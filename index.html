@@ -1,0 +1,76 @@
+<div class="rgc-page">
+  <div class="rgc-header">
+    <div class="rgc-header-icon">📁</div>
+    <div class="rgc-header-text">
+      <h2>폴더 복사 (rclone G2G)</h2>
+      <p>rclone을 이용해 구글 드라이브 폴더를 서버사이드로 복사합니다. (다운로드/업로드 없이 구글 서버 내부에서 처리)</p>
+    </div>
+  </div>
+
+  <div class="rgc-config-banner" data-role="config-banner">
+    설정을 확인하는 중...
+  </div>
+
+  <div class="rgc-card">
+    <label class="rgc-method-toggle" data-role="method-toggle-label">
+      <span class="rgc-switch">
+        <input type="checkbox" data-role="method-checkbox" />
+        <span class="rgc-switch-slider"></span>
+      </span>
+      <span class="rgc-method-toggle-text">Google Apps Script로 복사 (rclone 대신)</span>
+    </label>
+    <p class="rgc-field-hint" data-role="method-hint">
+      기본은 rclone(서버 프로세스)입니다. 체크하면 별도로 배포한 Google Apps
+      Script 웹앱이 구글 서버 안에서 복사를 처리합니다 (이 화면을 닫아도 계속
+      진행됨). 목적지도 마운트 경로가 아니라 <strong>구글 드라이브 폴더
+      URL/ID</strong>를 입력해야 합니다.
+    </p>
+
+    <div class="rgc-field">
+      <label for="rgc-source-url" data-role="source-label">소스 폴더 (구글 드라이브 URL 또는 폴더 ID)</label>
+      <input
+        type="text"
+        id="rgc-source-url"
+        data-role="source-url"
+        placeholder="https://drive.google.com/drive/folders/xxxxxxxxxxxx"
+        autocomplete="off"
+      />
+    </div>
+
+    <div class="rgc-field">
+      <label for="rgc-dest-folder" data-role="dest-label">목적지 경로 (도커/호스트 마운트 경로 또는 rclone 기준 상대 경로 둘 다 입력 가능)</label>
+      <input
+        type="text"
+        id="rgc-dest-folder"
+        data-role="dest-folder"
+        placeholder="/mnt/zeeps_member/zeepsmember/공유_폴더명 또는 /zeepsmember/공유_폴더명"
+        autocomplete="off"
+      />
+      <p class="rgc-dest-preview" data-role="dest-preview"></p>
+    </div>
+
+    <button type="button" class="rgc-start-btn" data-role="start-btn">복사 시작</button>
+    <button type="button" class="rgc-cancel-btn" data-role="cancel-btn" hidden>중단</button>
+    <span class="rgc-status-text" data-role="status-text"></span>
+    <button type="button" class="rgc-reset-link" data-role="reset-btn" hidden>강제 초기화</button>
+
+    <div class="rgc-progress-wrap" data-role="progress-wrap" hidden>
+      <div class="rgc-progress-head">
+        <span class="rgc-progress-percent" data-role="progress-percent">0%</span>
+        <span class="rgc-progress-summary" data-role="progress-summary"></span>
+      </div>
+      <div class="rgc-progress-track">
+        <div class="rgc-progress-fill" data-role="progress-fill" style="width: 0%"></div>
+      </div>
+      <div class="rgc-progress-detail" data-role="progress-detail"></div>
+    </div>
+  </div>
+
+  <div class="rgc-log-card">
+    <div class="rgc-log-head">
+      <span class="rgc-log-head-title">실행 로그</span>
+      <span class="rgc-log-dest" data-role="log-dest"></span>
+    </div>
+    <pre class="rgc-log-box" data-role="log-box">복사를 시작하면 이곳에 진행 상황이 표시됩니다.</pre>
+  </div>
+</div>

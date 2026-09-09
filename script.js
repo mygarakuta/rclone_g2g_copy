@@ -1,0 +1,487 @@
+// rclone_g2g_copy 플러그인 카테고리탭 풀페이지 스크립트
+// scan_scheduler의 script.js와 동일하게 new Function('pluginId', 'container', ...)로
+// 실행되므로 import 없이 전역 API + 인자로 받는 pluginId/container만 사용합니다.
+
+(function () {
+  const LOG_PREFIX = '[rclone_g2g_copy]';
+  console.log(LOG_PREFIX, '0/2 카테고리탭 UI 로드됨.');
+
+  // scan_scheduler와 동일하게, 이 플러그인도 특정 db_type(라이브러리 스코프)에
+  // 종속되지 않는 전역 유틸리티라 'general'로 고정해서 보냅니다.
+  const DB_TYPE = 'general';
+
+  let pollTimer = null;
+  let renderedLineCount = 0;
+  let lastJobStatus = null; // running | success | error | cancelled | null(아직 없음)
+
+  const banner = container.querySelector('[data-role="config-banner"]');
+  const methodCheckbox = container.querySelector('[data-role="method-checkbox"]');
+  const methodToggleLabel = container.querySelector('[data-role="method-toggle-label"]');
+  const sourceLabel = container.querySelector('[data-role="source-label"]');
+  const destLabel = container.querySelector('[data-role="dest-label"]');
+  const sourceInput = container.querySelector('[data-role="source-url"]');
+  const destInput = container.querySelector('[data-role="dest-folder"]');
+  const destPreview = container.querySelector('[data-role="dest-preview"]');
+  const startBtn = container.querySelector('[data-role="start-btn"]');
+  const cancelBtn = container.querySelector('[data-role="cancel-btn"]');
+  const resetBtn = container.querySelector('[data-role="reset-btn"]');
+  const statusText = container.querySelector('[data-role="status-text"]');
+  const logBox = container.querySelector('[data-role="log-box"]');
+  const logDest = container.querySelector('[data-role="log-dest"]');
+  const progressWrap = container.querySelector('[data-role="progress-wrap"]');
+  const progressFill = container.querySelector('[data-role="progress-fill"]');
+  const progressPercent = container.querySelector('[data-role="progress-percent"]');
+  const progressSummary = container.querySelector('[data-role="progress-summary"]');
+  const progressDetail = container.querySelector('[data-role="progress-detail"]');
+
+  let mountPrefix = '';
+  let gasConfigured = false;
+  let inputsPrefilled = false;
+
+  // 현재 선택된 백엔드. 체크박스가 켜져 있고 GAS_WEBAPP_URL이 설정돼 있을 때만
+  // 'gas', 그 외엔 항상 'rclone' (기본값 - 하위 호환).
+  function currentMethod() {
+    return methodCheckbox.checked && gasConfigured ? 'gas' : 'rclone';
+  }
+
+  function updateMethodUI() {
+    const method = currentMethod();
+    if (method === 'gas') {
+      sourceLabel.textContent = '소스 폴더 (구글 드라이브 URL 또는 폴더 ID)';
+      destLabel.textContent = '목적지 폴더 (구글 드라이브 URL 또는 폴더 ID)';
+      destInput.placeholder = 'https://drive.google.com/drive/folders/xxxxxxxxxxxx';
+      destPreview.textContent = ''; // GAS 모드에서는 마운트 경로 변환 미리보기가 의미 없음
+      destPreview.removeAttribute('data-state');
+    } else {
+      sourceLabel.textContent = '소스 폴더 (구글 드라이브 URL 또는 폴더 ID)';
+      destLabel.textContent = '목적지 경로 (도커/호스트 마운트 경로 또는 rclone 기준 상대 경로 둘 다 입력 가능)';
+      destInput.placeholder = '/mnt/zeeps_member/zeepsmember/공유_폴더명 또는 /zeepsmember/공유_폴더명';
+      updateDestPreview();
+    }
+  }
+
+  methodCheckbox.addEventListener('change', updateMethodUI);
+
+  // 폴링 주기. 이 프레임워크는 요청마다 플러그인 모듈을 새로 로드하는
+  // 구조라(README 참고), 폴링이 잦을수록 서버 부하가 커진다. 그래서:
+  //  - 시작 직후 잠깐만(START_BURST_MS) 빠르게(FAST_MS) 확인해서 반응성을 살리고,
+  //  - 그 뒤로는 느리게(SLOW_MS)만 확인한다.
+  //  - 브라우저 탭이 보이지 않을 때는(document.hidden) 폴링을 완전히 멈추고,
+  //    다시 보이게 되면 즉시 한 번 확인 후 재개한다.
+  const POLL_FAST_MS = 2000;
+  const POLL_SLOW_MS = 8000;
+  const POLL_FAST_WINDOW_MS = 20000;
+  let pollStartedAt = 0;
+
+  const STATUS_LABEL = {
+    success: '완료',
+    cancelled: '사용자가 중단함',
+  };
+
+  // logic.py의 to_rclone_relative_path()와 동일한 규칙: 입력이 마운트
+  // 접두사로 시작하면 그 부분을 잘라내 rclone 기준 상대 경로로 바꾼다.
+  // (서버에서도 동일하게 다시 한 번 변환하므로, 여기는 미리보기 전용)
+  function toRcloneRelativePath(path, prefix) {
+    const p = (path || '').trim();
+    if (!p) return p;
+    const normPath = p.replace(/\/+$/, '');
+    const normPrefix = (prefix || '').trim().replace(/\/+$/, '');
+    if (normPrefix && normPath.startsWith(normPrefix)) {
+      let remainder = normPath.slice(normPrefix.length);
+      if (!remainder.startsWith('/')) remainder = '/' + remainder;
+      return remainder || '/';
+    }
+    return p;
+  }
+
+  function updateDestPreview() {
+    const raw = (destInput.value || '').trim();
+    if (!raw) {
+      destPreview.textContent = '';
+      destPreview.removeAttribute('data-state');
+      return;
+    }
+    const converted = toRcloneRelativePath(raw, mountPrefix);
+    if (converted !== raw) {
+      destPreview.textContent = `→ rclone 기준 경로: ${converted}`;
+      destPreview.setAttribute('data-state', 'converted');
+    } else {
+      destPreview.textContent = `rclone 기준 경로로 그대로 사용됩니다: ${raw}`;
+      destPreview.removeAttribute('data-state');
+    }
+  }
+
+  destInput.addEventListener('input', updateDestPreview);
+
+  function renderConfigBanner(cfg) {
+    if (!cfg) return;
+    mountPrefix = cfg.mount_prefix || '';
+
+    // job_state.json/job.log가 실제로 어느 경로에 있는지는 배너 툴팁(마우스
+    // 오버)과 콘솔에 남겨둔다 - "강제 초기화해도 그대로임" 같은 문제를
+    // 진단할 때, 앱이 실제로 쓰는 경로를 바로 확인할 수 있게.
+    if (cfg.data_dir) {
+      banner.title = `데이터 경로: ${cfg.data_dir}`;
+      if (!renderConfigBanner._loggedDataDir) {
+        renderConfigBanner._loggedDataDir = true;
+        console.log(LOG_PREFIX, '데이터 경로:', cfg.data_dir);
+      }
+    }
+
+    gasConfigured = !!cfg.gas_configured;
+    if (gasConfigured) {
+      methodToggleLabel.removeAttribute('data-disabled');
+      methodCheckbox.disabled = false;
+    } else {
+      methodToggleLabel.setAttribute('data-disabled', 'true');
+      methodCheckbox.disabled = true;
+      methodCheckbox.checked = false; // GAS 설정이 없으면 강제로 rclone으로
+    }
+    updateMethodUI();
+
+    if (cfg.configured) {
+      banner.setAttribute('data-state', 'ok');
+      const discordNote = cfg.discord_notify_enabled ? ' · 디스코드 알림 켜짐' : '';
+      const gasNote = gasConfigured ? ' · GAS 사용 가능' : '';
+      banner.textContent =
+        `설정 완료 · remote: ${cfg.rclone_remote} · rclone: ${cfg.rclone_path} · 마운트 접두사: ${cfg.mount_prefix}${discordNote}${gasNote}`;
+    } else {
+      banner.setAttribute('data-state', 'missing');
+      banner.textContent =
+        'RCLONE_PATH / CONFIG_PATH / RCLONE_REMOTE가 아직 설정되지 않았습니다. 설정 화면에서 먼저 저장해주세요.';
+    }
+  }
+
+  function appendLines(lines) {
+    // 이전엔 새 줄마다 logBox.textContent += line 을 반복했는데, 줄이
+    // 많아지면(수백~수천 줄) 매번 전체 문자열을 새로 복사하게 되어(사실상
+    // O(n^2)) 화면 전환/새로고침 직후 첫 렌더링이 눈에 띄게 느렸다.
+    // 서버가 최근 최대 500줄만 내려주므로(logic.py의 _MAX_RETURN_LINES),
+    // 매 폴링마다 배열을 한 번에 join해서 통째로 다시 그려도 충분히 가볍다
+    // (길이만 비교해서 건너뛰면, 오래된 줄이 잘려나가고 새 줄이 추가돼
+    // 총 길이가 그대로인 경우를 놓쳐 갱신이 멈춘 것처럼 보이는 버그가 있었음).
+    if (!lines) return;
+
+    const nearBottom = logBox.scrollHeight - logBox.scrollTop - logBox.clientHeight < 40;
+    logBox.textContent = lines.join('\n');
+    renderedLineCount = lines.length;
+    if (nearBottom) {
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+  }
+
+  function stopPolling() {
+    if (pollTimer) {
+      clearTimeout(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  function scheduleNextPoll() {
+    stopPolling();
+    if (document.hidden) return; // 탭이 안 보이면 예약하지 않음 - visibilitychange가 재개시킴
+    const elapsed = Date.now() - pollStartedAt;
+    const interval = elapsed < POLL_FAST_WINDOW_MS ? POLL_FAST_MS : POLL_SLOW_MS;
+    pollTimer = setTimeout(poll, interval);
+  }
+
+  function setRunningUI(isRunning) {
+    startBtn.disabled = isRunning;
+    cancelBtn.hidden = !isRunning;
+    cancelBtn.disabled = false;
+    // 실행 중에는 방식을 바꿔봐야 이번 job에는 적용이 안 되니 혼란 방지 차원에서 잠금
+    methodCheckbox.disabled = isRunning || !gasConfigured;
+    // "중단"이 눌러도 안 먹히거나 실제로는 안 도는데 running으로 남아있는
+    // 꼬인 상황을 위한 탈출구 - 실행 중일 때 같이 보여준다.
+    resetBtn.hidden = !isRunning;
+  }
+
+  function formatProgressDetail(progress) {
+    const parts = [];
+    if (progress.transferred && progress.total) parts.push(`${progress.transferred} / ${progress.total}`);
+    if (progress.speed) parts.push(progress.speed);
+    if (progress.eta) parts.push(`ETA ${progress.eta}`);
+    return parts.join(' · ');
+  }
+
+  // "전체 진행률"로 보여줄 하나의 퍼센트를 고른다. rclone은 바이트 기준과
+  // 파일개수 기준, 두 가지 퍼센트를 따로 찍는데 파일 크기가 제각각이면 서로
+  // 다르게 움직인다. 바이트 기준(percent, 전체 데이터량 대비)이 더 정확한
+  // "전체" 지표라 우선하고, 아직 그 줄이 안 나왔으면(막 시작 직후) 파일개수
+  // 기준(files_percent)으로 대체해서 진행률 바가 먼저 움직이는 걸 보여준다.
+  function overallPercent(progress) {
+    if (typeof progress.percent === 'number') return progress.percent;
+    if (typeof progress.files_percent === 'number') return progress.files_percent;
+    return null;
+  }
+
+  function renderProgress(job) {
+    const progress = (job && job.progress) || null;
+    const hasData = progress && Object.keys(progress).length > 0;
+
+    if (!hasData) {
+      if (job && job.status === 'running') {
+        progressWrap.hidden = false;
+        progressFill.style.width = '0%';
+        progressPercent.textContent = '0%';
+        progressSummary.textContent = '';
+        progressDetail.textContent = '진행률 계산 중...';
+      } else {
+        progressWrap.hidden = true;
+      }
+      return;
+    }
+
+    progressWrap.hidden = false;
+    const percent = overallPercent(progress);
+    const clamped = Math.max(0, Math.min(100, percent || 0));
+    progressFill.style.width = `${clamped}%`;
+    progressPercent.textContent = percent === null ? '-' : `${clamped}%`;
+    progressSummary.textContent = progress.files_total
+      ? `${progress.files_done || 0} / ${progress.files_total} 파일`
+      : '';
+    progressDetail.textContent = formatProgressDetail(progress);
+  }
+
+  function renderJob(job) {
+    if (!job) {
+      logDest.textContent = '';
+      setRunningUI(false);
+      progressWrap.hidden = true;
+      return;
+    }
+
+    // 화면을 새로 열었을 때(또는 새로고침) 이미 진행 중이거나 방금 끝난 job이
+    // 있으면, 사용자가 입력했던 원본 값(변환 전)을 그대로 입력창에 복원한다.
+    // 딱 한 번만 채우고, 이후에는 사용자가 직접 수정한 값을 건드리지 않는다.
+    if (!inputsPrefilled) {
+      inputsPrefilled = true;
+      if (job.source_url_input && !sourceInput.value) {
+        sourceInput.value = job.source_url_input;
+      }
+      if (job.dest_input && !destInput.value) {
+        destInput.value = job.dest_input;
+      }
+      // 이 job이 실제로 어느 백엔드로 시작됐는지에 맞춰 체크박스도 복원
+      // (예: GAS로 시작한 job이 진행 중일 때 새로고침해도 체크 상태 유지)
+      methodCheckbox.checked = job.backend === 'gas';
+      updateMethodUI();
+    }
+    logDest.textContent = job.dest_path ? `→ ${job.dest_path}` : '';
+    appendLines(job.lines);
+    renderProgress(job); // 진행률은 상태가 바뀌지 않아도(계속 'running') 매 폴링마다 갱신되어야 함
+
+    if (job.status === 'running') {
+      setRunningUI(true);
+    }
+
+    if (job.status === lastJobStatus) return;
+    lastJobStatus = job.status;
+
+    if (job.status === 'running') {
+      statusText.textContent = '복사 진행 중...';
+    } else if (job.status === 'success' || job.status === 'cancelled') {
+      statusText.textContent = STATUS_LABEL[job.status];
+      setRunningUI(false);
+      stopPolling();
+    } else if (job.status === 'error') {
+      statusText.textContent = `오류로 종료됨 (종료 코드: ${job.returncode})`;
+      setRunningUI(false);
+      stopPolling();
+    }
+  }
+
+  // ==================================================================
+  // 데이터 로딩 (설정 상태 + 최근 job 상태) - scan_scheduler의
+  // fetchSchedules()와 동일한 엔드포인트 규약
+  // ==================================================================
+  function poll() {
+    const params = new URLSearchParams({ type: DB_TYPE, limit: '1' });
+    const url = `/api/media/dashboard/widgets/${pluginId}/data?${params.toString()}`;
+
+    fetch(url)
+      .then((res) => res.json())
+      .then((data) => {
+        if (!data.success) {
+          statusText.textContent = `상태 조회 실패: ${data.error || '알 수 없는 오류'}`;
+          console.warn(LOG_PREFIX, '데이터 조회 실패:', data.error);
+          return;
+        }
+        renderConfigBanner(data.config);
+        renderJob(data.job);
+
+        if (data.job && data.job.status === 'running') {
+          if (!pollStartedAt) pollStartedAt = Date.now();
+          scheduleNextPoll();
+        } else {
+          pollStartedAt = 0;
+          stopPolling();
+        }
+      })
+      .catch((err) => {
+        statusText.textContent = `상태 조회 실패: ${err}`;
+        console.error(LOG_PREFIX, '요청 실패:', err);
+        // 네트워크 오류로도 폴링이 끊기지 않도록, 진행 중이었다면 계속 재시도
+        if (pollStartedAt) scheduleNextPoll();
+      });
+  }
+
+  // 탭이 백그라운드로 가면 폴링을 멈추고, 다시 보이면 즉시 한 번 확인 후
+  // 필요하면 재개한다 - 안 보고 있는 동안의 불필요한 부하를 없앤다.
+  function onVisibilityChange() {
+    if (document.hidden) {
+      stopPolling();
+    } else {
+      poll();
+    }
+  }
+  document.addEventListener('visibilitychange', onVisibilityChange);
+
+  // ==================================================================
+  // 액션 호출 공통부 - scan_scheduler의 saveEdit()과 동일한 호출 규약:
+  // POST /api/media/books/0/apply-metadata,
+  // body { type, source: pluginId, item_data }, 응답은 data.success / data.error
+  // ==================================================================
+  function callApply(itemData) {
+    return fetch('/api/media/books/0/apply-metadata', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: DB_TYPE, source: pluginId, item_data: itemData }),
+    }).then((res) => res.json());
+  }
+
+  function startCopy() {
+    const sourceUrl = (sourceInput.value || '').trim();
+    const destFolder = (destInput.value || '').trim();
+
+    if (!sourceUrl) {
+      statusText.textContent = '소스 폴더 URL(또는 ID)을 입력해주세요.';
+      return;
+    }
+    if (!destFolder) {
+      statusText.textContent = '목적지 경로를 입력해주세요.';
+      return;
+    }
+
+    startBtn.disabled = true;
+    statusText.textContent = '요청을 보내는 중...';
+    renderedLineCount = 0;
+    lastJobStatus = null;
+    logBox.textContent = '';
+    logDest.textContent = '';
+    progressWrap.hidden = true;
+    progressFill.style.width = '0%';
+    progressPercent.textContent = '0%';
+    progressSummary.textContent = '';
+    progressDetail.textContent = '';
+
+    callApply({
+      action: 'start_copy',
+      method: currentMethod(),
+      source_url: sourceUrl,
+      dest_folder_name: destFolder,
+    })
+      .then((data) => {
+        if (!data || !data.success) {
+          const message = (data && (data.error || data.message)) || '요청이 거부되었습니다.';
+          statusText.textContent = message;
+          startBtn.disabled = false;
+          // "이미 실행 중" 류의 거부라면, 실제로는 꼬여서 안 풀리는 상황일 수
+          // 있으니 강제 초기화 링크를 보여준다.
+          if (message.indexOf('이미 실행 중') !== -1) {
+            resetBtn.hidden = false;
+          }
+          return;
+        }
+        statusText.textContent = data.message || '복사를 시작했습니다.';
+        console.log(LOG_PREFIX, '복사 시작 요청 성공');
+        pollStartedAt = Date.now(); // 시작 직후 잠깐은 빠르게 확인
+        poll();
+      })
+      .catch((err) => {
+        statusText.textContent = `시작 실패: ${err}`;
+        startBtn.disabled = false;
+        console.error(LOG_PREFIX, '요청 실패:', err);
+      });
+  }
+
+  function cancelCopy() {
+    if (!window.confirm('진행 중인 복사를 중단할까요? 이미 복사된 파일은 그대로 남습니다.')) {
+      return;
+    }
+    cancelBtn.disabled = true;
+    statusText.textContent = '중단 요청 중...';
+
+    callApply({ action: 'cancel_copy' })
+      .then((data) => {
+        if (!data || !data.success) {
+          statusText.textContent = (data && (data.error || data.message)) || '중단 요청이 거부되었습니다.';
+          cancelBtn.disabled = false;
+          return;
+        }
+        statusText.textContent = data.message || '중단을 요청했습니다.';
+        console.log(LOG_PREFIX, '중단 요청 성공');
+        // 중단 처리가 실제로 끝나는 걸 빨리 반영하도록 잠깐 빠른 주기로 전환
+        pollStartedAt = Date.now();
+        poll();
+      })
+      .catch((err) => {
+        statusText.textContent = `중단 요청 실패: ${err}`;
+        cancelBtn.disabled = false;
+        console.error(LOG_PREFIX, '요청 실패:', err);
+      });
+  }
+
+  function resetJob() {
+    if (
+      !window.confirm(
+        '작업 상태를 강제로 초기화할까요?\n\n' +
+          '"중단"이 안 먹히거나, 실제로는 끝났는데 화면에 계속 "실행 중"으로 남아있을 때만 사용하세요.\n' +
+          'GAS로 시작한 작업은 이 화면에서만 기록이 지워질 뿐, 구글 서버에서 실제로 돌고 있었다면 그쪽은 계속 진행됩니다.'
+      )
+    ) {
+      return;
+    }
+    resetBtn.disabled = true;
+    statusText.textContent = '초기화 중...';
+
+    callApply({ action: 'reset_job' })
+      .then((data) => {
+        if (!data || !data.success) {
+          statusText.textContent = (data && (data.error || data.message)) || '초기화가 거부되었습니다.';
+          resetBtn.disabled = false;
+          return;
+        }
+        statusText.textContent = data.message || '초기화되었습니다.';
+        console.log(LOG_PREFIX, '강제 초기화 완료');
+        lastJobStatus = null;
+        renderedLineCount = 0;
+        setRunningUI(false);
+        logBox.textContent = '';
+        logDest.textContent = '';
+        progressWrap.hidden = true;
+        stopPolling();
+        pollStartedAt = 0;
+      })
+      .catch((err) => {
+        statusText.textContent = `초기화 실패: ${err}`;
+        resetBtn.disabled = false;
+        console.error(LOG_PREFIX, '요청 실패:', err);
+      });
+  }
+
+  startBtn.addEventListener('click', startCopy);
+  cancelBtn.addEventListener('click', cancelCopy);
+  resetBtn.addEventListener('click', resetJob);
+
+  // 탭이 언마운트될 때 폴링 타이머가 남지 않도록 정리 레지스트리에 등록
+  // (plugin_hub 작업 때 확인된 window.__bookOasisViewerCleanups 관례)
+  window.__bookOasisViewerCleanups = window.__bookOasisViewerCleanups || {};
+  window.__bookOasisViewerCleanups[pluginId] = function () {
+    stopPolling();
+    document.removeEventListener('visibilitychange', onVisibilityChange);
+  };
+
+  poll();
+  console.log(LOG_PREFIX, '1/2 초기 상태 조회 요청 시작');
+})();
