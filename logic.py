@@ -28,6 +28,10 @@ rclone_g2g_copy / logic.py
 OS가 보장하는 값인 PID를 파일에 저장해두고 os.kill(pid, SIGTERM)으로
 직접 종료합니다 - 요청을 처리하는 모듈 인스턴스가 job을 시작했던 그
 인스턴스와 달라도 항상 동작합니다.
+
+변경 이력(이번 수정): GAS(Google Apps Script) 백엔드 지원을 제거하면서,
+job_state.json의 backend 필드를 분기하던 코드를 모두 정리했습니다. 이제
+job_state.json은 항상 rclone 프로세스 하나만을 표현합니다.
 """
 
 import json
@@ -42,12 +46,12 @@ import uuid
 from configparser import ConfigParser
 
 PLUGIN_ID = "rclone_g2g_copy"
+
 # 앱 실행 작업 디렉터리(cwd) 기준 상대 경로. __file__ 기준 상위 폴더를
 # 거슬러 올라가는 대신, 요청하신 대로 "./plugins/data/<플러그인id>"를
 # 그대로 사용한다 (google_links 플러그인에서 확인된 것과 동일한 상대 경로
 # 표기 관례).
 DATA_DIR = os.path.join(".", "plugins", "data", PLUGIN_ID)  # ./plugins/data/rclone_g2g_copy
-
 STATE_FILE = os.path.join(DATA_DIR, "job_state.json")
 LOG_FILE = os.path.join(DATA_DIR, "job.log")
 
@@ -64,7 +68,7 @@ _STATE_LOCK = threading.Lock()
 # rclone --progress 출력에서 진행률을 뽑아내는 정규식.
 # rclone은 --progress 상태 블록에 "Transferred:" 줄을 두 개 찍는다 -
 # 하나는 바이트 기준(용량/속도/ETA 포함), 하나는 파일 개수 기준. 예:
-#   Transferred:      340.471 MiB / 1.818 GiB, 18%, 3.410 MiB/s, ETA 7m26s
+#   Transferred:       340.471 MiB / 1.818 GiB, 18%, 3.410 MiB/s, ETA 7m26s
 #   Transferred:            9 / 8053, 0%
 _BYTE_PROGRESS_RE = re.compile(
     r"^Transferred:\s*([\d.]+\s*[A-Za-z]+)\s*/\s*([\d.]+\s*[A-Za-z]+),\s*(\d+)%,"
@@ -75,6 +79,7 @@ _FILES_PROGRESS_RE = re.compile(r"^Transferred:\s*(\d+)\s*/\s*(\d+),\s*(\d+)%\s*
 
 def _parse_progress_line(line):
     """rclone --progress 출력 한 줄에서 진행률 정보를 뽑아낸다.
+
     매치되면 dict(일부 키만 채워짐), 아니면 None을 반환한다.
 
     rclone은 두 "Transferred:" 줄 각각에 자기 나름의 퍼센트를 찍는다 - 바이트
@@ -184,7 +189,6 @@ def _validate_config(rclone_path, config_path):
     if os.path.isabs(rclone_path) or "/" in rclone_path or "\\" in rclone_path:
         if not os.path.exists(rclone_path):
             raise ConfigError(f"지정한 경로에서 rclone 실행 파일을 찾을 수 없습니다: {rclone_path}")
-
     if not os.path.exists(config_path):
         raise ConfigError(f"지정한 경로에서 rclone.conf 파일을 찾을 수 없습니다: {config_path}")
 
@@ -220,7 +224,7 @@ def _update_state(**changes):
         state = _read_state() or {}
         state.update(changes)
         _write_state(state)
-        return state
+    return state
 
 
 def _reset_log():
@@ -265,7 +269,6 @@ def _read_log_lines():
 
     content = b"".join(reversed(blocks)).decode("utf-8", errors="replace")
     lines = content.splitlines()
-
     truncated = len(lines) > _MAX_RETURN_LINES or remaining > 0
     lines = lines[-_MAX_RETURN_LINES:]
     if truncated:
@@ -287,6 +290,7 @@ def _process_is_alive(pid):
 
 def _notify_discord(webhook_url, content):
     """복사 완료/실패/중단 시 디스코드 웹훅으로 알림을 보낸다.
+
     표준 라이브러리(urllib)만 쓰고, 실패해도 job 진행/결과 자체에는 영향을
     주지 않도록 예외를 삼킨다 (알림 실패로 job이 죽으면 안 되므로)."""
     webhook_url = (webhook_url or "").strip()
@@ -384,6 +388,7 @@ def _run_job(job_id, rclone_path, config_path, rclone_remote, source_id, dest_fo
     returncode = None
     process = None
     progress = {}  # 파일개수 줄과 바이트 줄이 서로 다른 순간에 나오므로 누적해서 합친다
+
     try:
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         _update_state(pid=process.pid)
@@ -393,6 +398,7 @@ def _run_job(job_id, rclone_path, config_path, rclone_remote, source_id, dest_fo
                 decoded = raw_line.decode("utf-8", errors="replace")
             except Exception:
                 decoded = raw_line.decode("latin-1", errors="ignore")
+
             # rclone --progress 는 캐리지리턴(\r)으로 같은 줄을 갱신하므로
             # 줄 단위 로그 뷰에서는 \r 기준으로 쪼개 마지막 조각만 남긴다.
             decoded = decoded.rstrip("\n")
@@ -400,7 +406,6 @@ def _run_job(job_id, rclone_path, config_path, rclone_remote, source_id, dest_fo
                 if piece:
                     _append_log_line(piece)
                     _maybe_explain_config_save_error(piece)
-
                     parsed = _parse_progress_line(piece)
                     if parsed:
                         progress.update(parsed)
@@ -413,7 +418,6 @@ def _run_job(job_id, rclone_path, config_path, rclone_remote, source_id, dest_fo
 
         process.wait()
         returncode = process.returncode
-
     except Exception as e:
         _append_log_line(f"\n[-] 스크립트 실행 중 예외 발생: {e}")
 
@@ -482,16 +486,8 @@ def start_copy_job(rclone_path, config_path, rclone_remote, source_folder_url, d
     source_id = get_folder_id(source_folder_url)
 
     existing = _read_state()
-    if existing and existing.get("status") == "running":
-        if existing.get("backend") == "gas":
-            # GAS job은 pid가 없어서(로컬 프로세스가 아님) 여기서 살아있는지 직접
-            # 확인할 방법이 없다. 잘못 놓치면 GAS/rclone이 동시에 도는 상황이
-            # 생기므로, 안전하게 "실행 중"으로 간주해 막는다 (진짜 끝났다면
-            # 화면을 새로고침하면 get_dashboard_data()가 웹앱에 물어봐서 곧
-            # 상태를 정리해준다).
-            raise RuntimeError("이미 실행 중인 GAS 복사 작업이 있습니다. 완료 또는 중단 후 다시 시도해주세요.")
-        if _process_is_alive(existing.get("pid")):
-            raise RuntimeError("이미 실행 중인 복사 작업이 있습니다. 완료 또는 중단 후 다시 시도해주세요.")
+    if existing and existing.get("status") == "running" and _process_is_alive(existing.get("pid")):
+        raise RuntimeError("이미 실행 중인 복사 작업이 있습니다. 완료 또는 중단 후 다시 시도해주세요.")
 
     job_id = uuid.uuid4().hex[:12]
     _reset_log()
@@ -518,7 +514,6 @@ def start_copy_job(rclone_path, config_path, rclone_remote, source_folder_url, d
         daemon=True,
     )
     thread.start()
-
     return job_id
 
 
@@ -558,7 +553,6 @@ def cancel_current_job():
                 pass
 
     threading.Thread(target=_force_kill_if_still_alive, daemon=True).start()
-
     return True, "중단을 요청했습니다. 잠시 후 종료됩니다."
 
 
@@ -568,9 +562,7 @@ def force_reset_job():
     "이미 실행 중인 작업이 있습니다"가 실제로는 끝났는데도 계속 뜨는 등,
     self-heal 로직으로도 안 풀리는 꼬인 상태를 사용자가 직접 빠져나올 수
     있게 하는 최후의 수단. rclone 프로세스가 실제로 살아있다면(비정상적인
-    상황이지만) 먼저 정리 시도한 뒤 상태를 초기화한다 - 다만 이미 죽었거나
-    GAS job이면 로컬 기록만 지운다 (GAS 쪽에서 실제로 돌고 있던 작업 자체를
-    멈추지는 못한다 - 그건 cancel_copy가 하는 일).
+    상황이지만) 먼저 정리 시도한 뒤 상태를 초기화한다.
 
     삭제가 실패해도(예: 권한 문제) 예외를 조용히 삼키지 않는다 - 예전엔
     실패해도 "성공했다"고 잘못 알려줘서, 진짜 원인(파일 삭제 권한 등)이
@@ -578,7 +570,7 @@ def force_reset_job():
     확인해서, 남아있으면 왜 실패한 것으로 보이는지와 함께 알려준다.
     """
     state = _read_state()
-    if state and state.get("backend") != "gas":
+    if state:
         pid = state.get("pid")
         if pid and _process_is_alive(pid):
             try:
@@ -614,21 +606,10 @@ def get_last_job_status():
     if state is None:
         return None
 
-    if state.get("backend") == "gas":
-        # GAS 백엔드는 로컬 프로세스가 없어 아래의 pid 기반 좀비 체크가
-        # 적용되지 않는다. 최신 상태로 갱신하는 일은(웹앱에 물어보기)
-        # gas_logic.maybe_refresh_gas_job()이 get_dashboard_data() 안에서
-        # 이 함수보다 먼저 호출되어 담당하므로, 여기서는 이미 반영된
-        # state를 프론트가 기대하는 형태(lines 키 포함)로만 맞춰 반환한다.
-        result = dict(state)
-        result["lines"] = state.get("gas_log_lines", [])
-        return result
-
-    # rclone 백엔드: status가 "running"인데 실제 프로세스가 죽어있으면
-    # (예: 컨테이너 재시작으로 스레드 자체가 사라진 경우) 좀비 상태로
-    # 영원히 "진행 중"으로 보이는 것을 막기 위해 여기서 정리한다. 단,
-    # job을 막 시작해서 아직 pid가 기록되기 전(Popen 호출 직전)일 수
-    # 있으므로 시작 직후 몇 초간은 봐준다.
+    # status가 "running"인데 실제 프로세스가 죽어있으면(예: 컨테이너 재시작으로
+    # 스레드 자체가 사라진 경우) 좀비 상태로 영원히 "진행 중"으로 보이는 것을
+    # 막기 위해 여기서 정리한다. 단, job을 막 시작해서 아직 pid가 기록되기
+    # 전(Popen 호출 직전)일 수 있으므로 시작 직후 몇 초간은 봐준다.
     just_started = (time.time() - (state.get("started_at") or 0)) < 5
     if state.get("status") == "running" and not state.get("pid") and just_started:
         pass  # 아직 pid 기록 전 - 정상, 다음 폴링 때 다시 확인
@@ -646,7 +627,8 @@ def get_last_job_status():
 
 
 def read_raw_state():
-    """job_state.json을 가공 없이 그대로 읽는다 (백엔드 판별 등에 사용).
+    """job_state.json을 가공 없이 그대로 읽는다.
+
     get_last_job_status()와 달리 좀비 체크나 로그 파일 읽기 같은 부가 처리를
     하지 않는, 가벼운 조회용."""
     return _read_state()
