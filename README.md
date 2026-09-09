@@ -6,13 +6,19 @@
 `scan_scheduler.py`/`script.js` 실제 소스를 참고해, 커스텀 Flask Blueprint 없이
 **BaseMetadataProvider 표준 계약(search/apply/get_dashboard_data)만으로** 동작합니다.
 
+> **v2.31.0 변경 사항**: Google Apps Script(GAS) 백엔드를 완전히 제거했습니다
+> (`gas_logic.py`, `gas/Code.gs` 삭제, 카테고리탭의 방식 선택 체크박스 삭제).
+> 이제 rclone 단일 백엔드로만 동작합니다. 또한 설정 조회 헬퍼를
+> `self.get_plugin_config(db_type, default=...)`로 수정하고, `update_manifest.raw_base_url`을
+> 실제 저장소(`mygarakuta/rclone_g2g_copy`)로 바로잡았습니다.
+
 ## 화면 구성
 
 - **설정(모달, settings.html)**: `RCLONE_PATH` / `CONFIG_PATH` / `RCLONE_REMOTE` /
-  `MOUNT_PREFIX`(선택) / `DISCORD_WEBHOOK_URL`(선택) — `config_schema`에 선언된
-  필드와 1:1 대응.
+  `MOUNT_PREFIX`(선택) / `DISCORD_WEBHOOK_URL`(선택) / `RCLONE_TRANSFERS` /
+  `RCLONE_CHECKERS` / `RCLONE_FAST_LIST` — `config_schema`에 선언된 필드와 1:1 대응.
 - **카테고리탭(사이드바 전체 화면, index.html)**: 소스 폴더(URL/ID), 목적지 경로,
-  [복사 시작]/[중단] 버튼, 실시간 로그.
+  [복사 시작]/[중단] 버튼, 진행률 바, 실시간 로그.
 
 ## 디자인이 plugin_board(플러그인게시판)와 한 세트로 보이는 이유
 
@@ -26,131 +32,8 @@ plugin_board의 실제 style.css를 받아서 확인 후 전부 `--app-*`로 교
 
 시각적으로도 맞췄습니다: 카드(`border-radius: 10px`, `var(--app-bg-card)` 배경),
 버튼([복사 시작]/[중단]은 `color-mix(in srgb, var(--app-accent) ...)` 톤의
-필 스타일), 방식 선택(rclone/GAS) 체크박스는 plugin_board의 활성화 토글
-스위치와 동일한 모양으로 교체, 성공/실패 배지 색도 plugin_board가 쓰는 것과
-같은 톤(`#4f9d76` 성공 / `#c0554f` 위험)으로 통일했습니다.
-
-## 백엔드 선택: rclone vs Google Apps Script
-
-카테고리탭 화면 상단에 **"Google Apps Script로 복사 (rclone 대신)"** 체크박스가
-있습니다. 설정에서 `GAS_WEBAPP_URL`을 입력해야 활성화되고, 기본은 항상
-rclone입니다(체크 안 하면 예전과 완전히 동일하게 동작 — 하위 호환).
-
-**왜 두 번째 백엔드가 필요한가**: rclone 방식은 지금 겪으신 것처럼
-rclone.conf 저장 실패(도커 볼륨 마운트 이슈, 아래 별도 항목 참고) 같은
-인프라 문제가 있을 수 있고, BookOasis 서버의 CPU/메모리를 씁니다. Google
-Apps Script(GAS) 방식은 복사 작업 자체가 **전적으로 구글 인프라 안에서**
-실행되므로 이런 문제가 원천적으로 없고, 서버 리소스도 전혀 안 씁니다. 대신
-Apps Script 특유의 제약(아래 설명)이 있어 상황에 따라 선택할 수 있게
-체크박스로 만들었습니다.
-
-### 설계: 기존 UI를 그대로 재사용
-
-GAS 방식은 로컬에 백그라운드 프로세스(PID)가 없습니다 — 실제 복사는 Apps
-Script의 **시간기반 트리거**가 구글 서버 안에서 처리하고, BookOasis 서버는
-그 웹앱에 상태를 물어보기만(polling) 합니다. 그래서 지금까지 만든 진행률
-바/로그/중단 버튼을 **하나도 새로 안 만들고 그대로 재사용**하도록, GAS
-상태를 기존 `job_state.json` 형식에 매핑했습니다:
-
-- `gas_logic.py`가 `start_gas_job()` / `refresh_gas_status()` /
-  `cancel_gas_job()`을 제공하고, `rclone_g2g_copy.py`가 `job_state.json`의
-  `backend` 필드(`"rclone"` 또는 `"gas"`)를 보고 시작/중단을 분기합니다.
-- **백그라운드 스레드가 필요 없습니다.** `get_dashboard_data()`가 호출될
-  때마다(=사용자가 폴링할 때마다) `maybe_refresh_gas_job()`이 그 자리에서
-  웹앱에 최신 상태를 물어보고 `job_state.json`을 갱신합니다. 이 프레임워크가
-  요청마다 모듈을 새로 로드하는 특성과 오히려 잘 맞습니다 — 어느 모듈
-  인스턴스가 요청을 받아도 그 순간 바로 최신 정보를 다시 받아오면 되므로,
-  rclone 백엔드에서 겪었던 "백그라운드 스레드가 orphan되는" 문제 자체가
-  생기지 않습니다.
-- 목적지 입력값도 다릅니다: rclone은 마운트 경로/rclone 상대경로를
-  받지만, GAS는 **구글 드라이브 폴더 URL/ID**를 그대로 받습니다 (체크박스를
-  켜면 화면의 라벨/placeholder가 자동으로 바뀝니다).
-
-Python 쪽(`gas_logic.py`, `rclone_g2g_copy.py`의 분기 로직)은
-`urllib.request.urlopen`을 모킹해서 시작/진행률 갱신/연속 실패 시 error 처리/
-취소까지 전부 유닛테스트했고, 체크박스 UI(`script.js`)도 jsdom으로
-미설정/설정됨/새로고침 시 상태 복원 세 시나리오를 검증했습니다. **다만
-`gas/Code.gs`(실제 Apps Script 코드) 자체는 이 환경에 Google API 실행
-수단이 없어서 직접 테스트하지 못했습니다** — 아래 배포 방법대로 설치하신
-뒤 작은 테스트 폴더로 먼저 확인해주세요.
-
-### gas/Code.gs 배포 방법
-
-1. https://script.google.com 에서 새 프로젝트 생성
-2. `gas/Code.gs` 파일 내용을 그대로 붙여넣기 (Advanced Drive Service 추가 불필요 — 기본 내장 `DriveApp`만 사용)
-3. 상단의 `SHARED_SECRET` 상수를 아무 임의의 긴 문자열로 변경
-4. 배포 > 새 배포 > 유형: 웹 앱
-   - 실행 계정: 나
-   - 액세스 권한이 있는 사용자: 아무나 (BookOasis 서버가 구글 계정으로 로그인할 방법이 없어 익명 접근이 필요 — 대신 `SHARED_SECRET`으로 보호)
-5. 최초 배포 시 "권한 검토"에서 내 드라이브 접근 권한 승인
-6. 배포된 웹 앱 URL(`.../exec`로 끝남)을 BookOasis 설정의 `GAS_WEBAPP_URL`에,
-   3번에서 정한 문자열을 `GAS_SHARED_SECRET`에 각각 붙여넣기
-
-### 배포가 잘 됐는지 BookOasis 없이 바로 확인하기 (curl)
-
-```bash
-curl -sL --post302 --post303 -X POST "웹앱URL" \
-  -H "Content-Type: application/json" \
-  -d '{"secret":"SHARED_SECRET값","action":"status","job_id":"x"}'
-```
-정상이면 `{"success":false,"error":"해당 job을 찾을 수 없습니다."}` 같은 **JSON**이
-돌아옵니다. `secret`을 일부러 틀리게 넣으면 `{"success":false,"error":"UNAUTHORIZED"}`가
-와야 정상입니다.
-
-**`--post302 --post303`가 꼭 필요한 이유**: GAS 웹앱은 POST 요청을 받으면
-항상 실제 결과가 있는 내부 URL로 302 리다이렉트를 한 번 거칩니다(정상 동작).
-그런데 `curl -L`은 기본적으로 301/302/303 리다이렉트를 따라갈 때 **POST를
-GET으로 바꾸고 요청 본문을 버리는** 옛날 HTTP 관행을 기본값으로 씁니다. 이
-옵션 없이 테스트하면 우리가 보낸 `secret`/`action`이 통째로 사라진 빈 GET
-요청만 GAS에 도착해서, `curl -sL`만 쓰면 반응이 없거나 "페이지를 찾을 수
-없음" 같은 엉뚱한 응답을 받게 됩니다 — **배포 자체는 멀쩡한데 이것 때문에
-안 되는 것처럼 보이는 경우가 실제로 있었습니다.**
-
-같은 문제가 Python `urllib.request`(BookOasis 쪽 실제 코드가 쓰는 것)의
-기본 동작에도 그대로 있었습니다 — `gas_logic.py`가 자체 리다이렉트 핸들러
-(`_PreservePostRedirectHandler`)로 이미 우회하도록 고쳐뒀습니다 (로컬 HTTP
-서버로 리다이렉트 상황을 직접 재현해서, POST 본문이 리다이렉트를 거쳐도
-그대로 유지되는지 검증 완료). curl로 위 명령이 정상 응답하면, BookOasis
-쪽도 정상적으로 통신될 것으로 예상됩니다.
-
-### GAS 방식의 제약
-
-- **실행시간 6분 제한**: Apps Script는 한 번 실행에 6분(개인 계정)까지만
-  돌 수 있습니다. `Code.gs`는 4.5분이 지나면 지금까지 진행 상황(폴더 스택
-  기반 체크포인트)을 저장하고 멈춘 뒤, 1분마다 도는 트리거가 이어받아
-  계속합니다 — 재귀 호출 대신 스택 기반 순회를 쓴 이유이기도 합니다.
-- **파일개수 기준 진행률만 제공**: 전체 용량을 미리 세지 않으므로(대용량
-  폴더에서 목록 조회 자체가 오래 걸릴 수 있어 생략) rclone처럼 바이트 기준
-  퍼센트/속도/ETA는 없고, "몇 개 중 몇 개 완료"만 보여줍니다.
-- **동시 1건 제한은 rclone/GAS를 합쳐 전체 1건**입니다 — rclone이 돌고
-  있으면 GAS 시작이, GAS가 돌고 있으면 rclone 시작이 막힙니다 (둘 다
-  `job_state.json`을 공유하기 때문). 다만 "실행 중" 표시가 로컬에 남아있어도
-  실제로는 이미 끝난 경우(예: 화면을 안 열어봐서 폴링이 한 번도 안 일어난
-  동안 GAS가 완료된 경우)를 대비해, 새로 시작하기 직전에 다시 한번
-  확인합니다 — rclone은 PID가 실제로 살아있는지, GAS는 웹앱에 최신 상태를
-  다시 물어봐서(self-heal) 실제로는 안 막혀도 되는 상황이면 자동으로
-  정리하고 새 job을 시작합니다.
-- 중단 요청은 **다음 체크포인트(최대 1분 이내)** 에서만 반영됩니다 —
-  즉시 멈추지 않습니다.
-- PropertiesService 용량 제한(전체 500KB) 때문에 로그는 최근 30줄만
-  보존됩니다 (rclone 백엔드의 로그 상한과 동일한 정신).
-
-### 중단 후 재시작해도 중복 파일이 안 생기는 이유
-
-`Code.gs`는 파일/폴더를 만들기 전에 항상 **목적지에 같은 이름(파일은 용량까지)
-의 것이 이미 있는지 먼저 확인하고, 있으면 건너뜁니다**. 그래서 두 가지 상황
-모두에서 중복이 생기지 않습니다:
-
-- **6분 실행시간을 넘겨 다음 트리거로 이어질 때**: 이어받은 트리거가 같은
-  폴더를 다시 순회해도, 이미 복사된 파일은 건너뛰고 안 된 것만 채워 넣습니다.
-- **중단(취소) 후 새로 시작할 때**: 완전히 새 job으로 처음부터 다시 순회하지만,
-  이미 복사돼 있는 파일/폴더는 전부 건너뛰고 못 끝낸 부분만 이어서 처리합니다.
-
-rclone의 기본 동작(목적지에 이미 있는 파일은 다시 옮기지 않음)과 같은
-원리입니다 — 그래서 안전하게 몇 번이고 중단하고 다시 시작할 수 있습니다.
-(다만 이름이 같아도 용량이 다르면 "다른 파일"로 보고 새로 복사합니다 —
-내용까지 비교하는 건 아니라서, 이름+용량이 우연히 같은 완전히 다른 파일이
-있다면 그건 건너뛰어질 수 있습니다.)
+필 스타일), 성공/실패 배지 색도 plugin_board가 쓰는 것과 같은 톤(`#4f9d76` 성공 /
+`#c0554f` 위험)으로 통일했습니다.
 
 ## 새로고침 시 입력창 복원
 
@@ -202,9 +85,9 @@ rclone copy의 목적지는 `remote:상대경로` 형태라, 마운트 접두사
 
 ## 폴링 부하 줄이기
 
-이 프레임워크는 요청마다 플러그인 모듈을 새로 로드하는 구조라(위 항목 참고),
-폴링이 잦을수록 서버 부하가 커집니다. 예전엔 진행 중일 때 무조건 1초 간격으로
-계속 확인했는데, 지금은:
+이 프레임워크는 요청마다 플러그인 모듈을 새로 로드하는 구조라(아래 "job 상태를
+왜 파일에 저장하는가" 항목 참고), 폴링이 잦을수록 서버 부하가 커집니다. 예전엔
+진행 중일 때 무조건 1초 간격으로 계속 확인했는데, 지금은:
 
 - **시작 직후 20초간**만 2초 간격으로 빠르게 확인하고, 그 뒤로는 **8초 간격**으로
   느리게 확인합니다 (`POLL_FAST_MS`/`POLL_SLOW_MS`/`POLL_FAST_WINDOW_MS`, `script.js`).
@@ -215,8 +98,6 @@ rclone copy의 목적지는 `remote:상대경로` 형태라, 마운트 접두사
 - 로그는 `setInterval` 대신 `setTimeout`을 매번 다시 예약하는 방식으로 바꿔서,
   탭이 숨겨진 동안 타이머가 계속 쌓이지 않게 했습니다. 탭을 여러 번 열고 닫아도
   `visibilitychange` 리스너가 중복 등록되지 않도록 언마운트 시 제거합니다.
-
-
 
 ## 디스코드 완료 알림
 
@@ -379,21 +260,18 @@ PID**를 상태 파일에 저장해두고, 중단 요청이 오면 `os.kill(pid,
 - 서버(컨테이너)가 재시작돼서 프로세스 자체가 완전히 사라진 경우엔
   `get_last_job_status()`가 PID 생존 여부를 확인해 "추적 불가" 상태로
   자동 정리합니다 (좀비 "진행 중" 상태로 영원히 남는 것 방지).
+- rclone은 목적지에 이미 같은 파일이 있으면 다시 옮기지 않는 것이 기본
+  동작이라, 중단 후 다시 [복사 시작]을 눌러도 이미 복사된 파일은 건너뛰고
+  나머지만 이어서 처리됩니다 — 몇 번이고 안전하게 중단하고 재시작할 수 있습니다.
 
 ### 동시 실행 차단이 self-heal로도 안 풀릴 때 — 강제 초기화
 
 "이미 실행 중인 복사 작업이 있습니다" 오류가 실제로는 이미 끝났거나 죽었는데도
-계속 뜨는 경우를 위해(예전 버전에서 이 판정 로직 자체에 버그가 있었음 —
-GAS job은 실제로 살아있는지 전혀 확인 안 하고 무조건 막았었음), [복사 시작]
-버튼이 이 메시지로 거부되면 그 옆에 **"강제 초기화"** 링크가 나타납니다.
-누르면 확인창 후 `job_state.json`/`job.log`를 통째로 지우고 처음(job 없음)
-상태로 되돌립니다 (rclone 프로세스가 실제로 살아있었다면 SIGTERM도 함께
-보냄). 진행 중일 때도 [중단] 버튼 옆에 항상 떠 있어서, 중단이 안 먹힐 때도
-탈출구로 쓸 수 있습니다.
-
-**주의**: GAS로 시작한 job을 강제 초기화하면 **로컬 기록만 지워집니다** —
-실제로 구글 서버에서 그 job이 아직 돌고 있었다면 그쪽은 계속 진행됩니다
-(멈추려면 초기화 전에 먼저 [중단]을 눌러야 함).
+계속 뜨는 경우를 위해, [복사 시작] 버튼이 이 메시지로 거부되면 그 옆에
+**"강제 초기화"** 링크가 나타납니다. 누르면 확인창 후 `job_state.json`/`job.log`를
+통째로 지우고 처음(job 없음) 상태로 되돌립니다 (rclone 프로세스가 실제로
+살아있었다면 SIGTERM도 함께 보냄). 진행 중일 때도 [중단] 버튼 옆에 항상 떠
+있어서, 중단이 안 먹힐 때도 탈출구로 쓸 수 있습니다.
 
 **강제 초기화를 눌러도 여전히 "이미 실행 중"이 뜬다면**: 예전엔
 `force_reset_job()`이 파일 삭제에 실패해도(권한 문제 등) 예외를 조용히
@@ -410,12 +288,12 @@ GAS job은 실제로 살아있는지 전혀 확인 안 하고 무조건 막았�
 1. `[복사 시작]` → `apply(action="start_copy")` → 기존에 실행 중(그리고 실제
    살아있는) job이 있으면 거부, 아니면 `job_state.json`/`job.log` 초기화 후
    백그라운드 스레드에서 `rclone copy ... --progress` 실행, PID를 상태 파일에 기록.
-2. index.html이 1초 간격으로 `GET /api/media/dashboard/widgets/rclone_g2g_copy/data`
+2. index.html이 주기적으로 `GET /api/media/dashboard/widgets/rclone_g2g_copy/data`
    폴링 → `get_dashboard_data()`가 상태 파일 + 로그 파일을 읽어 그대로 반환
    (`data.success`, `data.config`, `data.job`— `{data:...}`로 안 감싸짐, scan_scheduler와 동일).
 3. `[중단]` → `apply(action="cancel_copy")` → PID에 SIGTERM.
 4. 로그 파일은 `--progress`의 캐리지리턴(`\r`) 갱신 라인을 서버 쪽에서 조각내
-   별도 라인으로 저장하고, 반환 시 최근 3000줄까지만 돌려줍니다(그 이상은
+   별도 라인으로 저장하고, 반환 시 최근 30줄까지만 돌려줍니다(그 이상은
    앞부분 생략 표시).
 
 ## 파일 구조
@@ -425,12 +303,10 @@ rclone_g2g_copy/
   __init__.py          # provider 노출
   rclone_g2g_copy.py    # BaseMetadataProvider 계약 (search/apply/get_dashboard_data) + category_tab
   logic.py               # rclone 실행/파일 기반 job 상태 관리/중단(PID kill)/rclone.conf 파싱/디스코드 알림
-  gas_logic.py            # Google Apps Script 웹앱 통신 (시작/상태갱신/취소) - 대체 백엔드
-  gas/Code.gs              # Apps Script 소스 (script.google.com에 붙여넣어 배포)
-  settings.html            # 설정 모달 - RCLONE_PATH/CONFIG_PATH/RCLONE_REMOTE(풀다운)/MOUNT_PREFIX/DISCORD_WEBHOOK_URL/GAS_*
+  settings.html            # 설정 모달 - RCLONE_PATH/CONFIG_PATH/RCLONE_REMOTE(풀다운)/MOUNT_PREFIX/DISCORD_WEBHOOK_URL/RCLONE_TRANSFERS/RCLONE_CHECKERS/RCLONE_FAST_LIST
   settings.css              # 설정 모달 스타일
   settings.js                # RCLONE_REMOTE 풀다운 채우기 (rclone.conf 자동 조회)
-  index.html                  # 카테고리탭 전체 화면 - 실행 폼(rclone/GAS 토글) + 로그 + 중단 버튼
+  index.html                  # 카테고리탭 전체 화면 - 실행 폼 + 진행률 바 + 로그 + 중단 버튼
   style.css                    # 카테고리탭 화면 스타일
   script.js                     # 카테고리탭 화면 동작
   requirements.txt               # 빈 파일 (외부 pip 의존성 없음 - unified_book 규칙대로 패키지명만 적는 파일)
@@ -441,42 +317,30 @@ rclone_g2g_copy/
 실행 중 생성되는 데이터 (코드와 별도 경로, 업데이트해도 보존):
 ```
 ./plugins/data/rclone_g2g_copy/
-  job_state.json   # {job_id, status, backend("rclone"|"gas"), pid, cancel_requested, returncode,
-                    #  started_at, finished_at, source_id, dest_path, progress, ...
-                    #  (GAS job은 추가로 gas_job_id/gas_log_lines/gas_refresh_failures)}
-  job.log           # rclone --progress 출력 (한 줄씩) - GAS job의 로그는 job_state.json의
-                    # gas_log_lines에 직접 저장됨 (별도 파일 없음)
+  job_state.json   # {job_id, status, pid, cancel_requested, returncode,
+                    #  started_at, finished_at, source_id, dest_path, progress,
+                    #  source_url_input, dest_input, cancel_requested}
+  job.log           # rclone --progress 출력 (한 줄씩)
 ```
+
+## ⚠️ subprocess 실행에 대한 안내
+
+이 플러그인은 `logic.py`에서 `subprocess.Popen()`으로 rclone 실행 파일을 직접
+실행합니다. BookOasis 코어는 기본적으로 플러그인 코드의 서브프로세스 실행을
+정적 검사로 차단하므로(`guide_plugins.md` 2장 참고), **서버 관리자가 `.env`에
+`ALLOW_PLUGIN_SUBPROCESS=true`를 설정하지 않으면 이 플러그인은 로드 자체가
+거부됩니다.** (사이드바에 카테고리탭이 아예 안 뜨는 경우, 이 설정부터 확인해주세요.)
 
 ## !! 확인 필요한 부분 (실제 서버에서 검증 필요) !!
 
-1. `get_db_gateway(db_type).get_plugin_config(self.id)` 메서드명/반환 형태
-   — ridi_book 작업 때 확인됐다는 기록만 있고, 이번 세션엔 실제 소스가 없어
-   그대로 가정했습니다.
-2. `category_tab.icon` 아이콘 클래스 값 — scan_scheduler의 `fa-solid fa-table-cells`를
-   참고해 Font Awesome 클래스로 가정했습니다 (`fa-solid fa-clone`)
-3. `update_manifest.raw_base_url`은 아직 만들지 않은 저장소(`yume-script/rclone_g2g_copy`)
-   가정입니다.
-4. `./plugins/data/<plugin_id>/`는 앱의 현재 작업 디렉터리(cwd) 기준 상대 경로입니다.
+1. `category_tab.icon` 아이콘 클래스 값 — scan_scheduler의
+   `fa-solid fa-table-cells`를 참고해 Font Awesome 클래스로 가정했습니다
+   (`fa-solid fa-clone`).
+2. `./plugins/data/<plugin_id>/`는 앱의 현재 작업 디렉터리(cwd) 기준 상대 경로입니다.
    앱이 어디서 실행되든 항상 리포지토리/컨테이너 루트가 cwd라는 전제인데, 실제로
    다른 위치에서 기동된다면 엉뚱한 곳에 파일이 생길 수 있습니다. 그 경로에 쓰기
    권한이 있는지도 함께 확인 부탁드립니다 (안 되면 로그가 전혀 안 쌓일 수 있음).
-5. **`gas/Code.gs`는 실제 Google Apps Script/Drive API 환경에서 직접 실행해
-   검증하지 못했습니다.** `gas_logic.py`(BookOasis 쪽 HTTP 통신 로직)는
-   모킹으로 시작/진행률/실패/취소 시나리오를 전부 유닛테스트했고, **실제
-   배포된 웹앱과의 통신 자체는 curl로 직접 확인**했습니다 — 처음엔
-   `curl -sL`(리다이렉트에서 POST가 GET으로 바뀌는 걸 몰랐던 상태)로 테스트하다
-   "배포가 잘못된 것처럼" 보이는 상황을 겪었는데, 알고 보니 GAS 웹앱의 정상적인
-   302 릴레이를 curl/urllib 둘 다 기본 설정으로는 잘못 따라가서 POST 본문이
-   사라지는 문제였습니다 (위 "배포가 잘 됐는지 확인하기" 항목 참고).
-   `gas_logic.py`는 이미 자체 리다이렉트 핸들러로 고쳐뒀고, 로컬 HTTP 서버로
-   이 리다이렉트 상황 자체를 재현해서 POST 본문이 유지되는지도 검증했습니다.
-   다만 **`Code.gs`가 실제로 파일을 복사하는 로직 자체**(doPost 파싱, 6분
-   실행시간 제한 대응, 트리거 재개/정리)는 여전히 이 환경에서 실행해볼 방법이
-   없어 미검증 상태입니다. 작은 테스트 폴더로 먼저 검증해보시고, 문제가 있으면
-   오류 메시지와 함께 알려주시면 바로 고쳐드리겠습니다. 특히 아래는 눈여겨봐 주세요:
-   - 6분 실행시간 제한에 걸리기 전에 상태 저장이 제때 이루어지는지
-     (파일이 아주 많은 폴더로 테스트 시)
-   - `ScriptApp.newTrigger`로 만든 시간기반 트리거가 정상적으로 재개/정리되는지
-     (Apps Script 프로젝트의 "트리거" 메뉴에서 좀비 트리거가 남아있지 않은지 확인)
-
+3. `apply-metadata` 응답 JSON의 성공/실패 필드명(`success`/`message`)은
+   실제 소스로 확인된 것이 아니라 plugin_board/scan_scheduler 사용 패턴을
+   참고해 가정한 값입니다 — 실제 응답이 다르면 `script.js`/`settings.js`의
+   파싱 부분만 고치면 됩니다.
