@@ -149,42 +149,25 @@
   </div>
 
   <p class="rgc-settings-desc" style="margin-top: 24px;">
-    <strong>Google Apps Script 방식 (선택)</strong> — rclone 대신, 별도로 배포한
-    Google Apps Script 웹앱이 구글 서버 안에서 복사를 처리하도록 할 수 있습니다.
-    카테고리탭 화면에 "Google Apps Script로 복사" 체크박스가 나타나며, 아래
-    URL을 입력해야 활성화됩니다. 배포 방법은 플러그인 폴더의
-    <code>gas/Code.gs</code> 상단 주석을 참고하세요.
+    <strong>다운로드 후 압축 해제</strong> — 카테고리탭에서 "다운로드 + 압축 해제"
+    모드를 쓰면, 개별 압축파일(zip/cbz)을 서버로 받아온 뒤 곧바로 압축을 풀어
+    지정한 로컬 폴더에 저장합니다.
   </p>
 
   <div class="rgc-field">
-    <label for="rgc-gas-webapp-url">GAS_WEBAPP_URL (선택)</label>
-    <input
-      type="text"
-      id="rgc-gas-webapp-url"
-      name="GAS_WEBAPP_URL"
-      placeholder="https://script.google.com/macros/s/xxxxxxxx/exec"
-      autocomplete="off"
-    />
+    <label for="rgc-keep-archive">
+      <input
+        type="checkbox"
+        id="rgc-keep-archive"
+        name="KEEP_ARCHIVE_AFTER_EXTRACT"
+        style="width: auto; margin-right: 6px;"
+      />
+      압축 해제 후 원본 압축파일도 목적지 폴더에 함께 보관
+    </label>
     <p class="rgc-field-hint">
-      script.google.com에서 <code>gas/Code.gs</code>를 배포한 뒤 나오는 웹 앱
-      URL(.../exec로 끝남)입니다. 비워두면 GAS 방식 자체가 비활성화됩니다.
-    </p>
-  </div>
-
-  <div class="rgc-field">
-    <label for="rgc-gas-secret">GAS_SHARED_SECRET (선택)</label>
-    <input
-      type="password"
-      id="rgc-gas-secret"
-      name="GAS_SHARED_SECRET"
-      placeholder="아무 임의의 긴 문자열"
-      autocomplete="off"
-    />
-    <p class="rgc-field-hint">
-      <code>gas/Code.gs</code> 상단의 <code>SHARED_SECRET</code> 상수와
-      <strong>정확히 동일한 값</strong>을 입력해야 합니다. 웹앱이 익명 접근
-      허용으로 배포되므로, 이 비밀키가 없으면 URL만 알면 누구나 내 드라이브
-      파일을 복사시킬 수 있습니다.
+      기본(꺼짐)은 압축 해제가 끝나면 다운로드했던 원본 zip/cbz 파일을 삭제합니다
+      (구글 드라이브의 원본은 그대로 남아있으므로 데이터 손실은 없습니다).
+      켜두면 압축 해제 후 그 원본 파일도 목적지 폴더 안에 함께 남겨둡니다.
     </p>
   </div>
 </div>

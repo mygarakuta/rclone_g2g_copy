@@ -3,7 +3,7 @@
     <div class="rgc-header-icon">📁</div>
     <div class="rgc-header-text">
       <h2>폴더 복사 (rclone G2G)</h2>
-      <p>rclone을 이용해 구글 드라이브 폴더를 서버사이드로 복사합니다. (다운로드/업로드 없이 구글 서버 내부에서 처리)</p>
+      <p>rclone을 이용해 구글 드라이브 폴더/파일을 서버사이드로 복사하거나, 압축파일을 다운로드해 로컬에 압축 해제합니다.</p>
     </div>
   </div>
 
@@ -22,6 +22,10 @@
         <label class="rgc-radio">
           <input type="radio" name="rgc-source-kind" value="file" data-role="source-kind-file" />
           <span>📦 개별 압축파일 (zip/cbz 등 1개)</span>
+        </label>
+        <label class="rgc-radio">
+          <input type="radio" name="rgc-source-kind" value="file_extract" data-role="source-kind-extract" />
+          <span>📦→📂 다운로드 + 압축 해제</span>
         </label>
       </div>
     </div>

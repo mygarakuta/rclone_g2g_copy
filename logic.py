@@ -29,20 +29,25 @@ OS가 보장하는 값인 PID를 파일에 저장해두고 os.kill(pid, SIGTERM)
 직접 종료합니다 - 요청을 처리하는 모듈 인스턴스가 job을 시작했던 그
 인스턴스와 달라도 항상 동작합니다.
 
-변경 이력(이번 수정): GAS(Google Apps Script) 백엔드 지원을 제거하면서,
-job_state.json의 backend 필드를 분기하던 코드를 모두 정리했습니다. 이제
-job_state.json은 항상 rclone 프로세스 하나만을 표현합니다.
+변경 이력(이번 수정): "다운로드 후 압축 해제(file_extract)" 모드를 추가했습니다.
+개별 파일을 rclone backend copyid로 서버 로컬 스테이징 폴더에 내려받은 뒤,
+파이썬 표준 라이브러리 zipfile로 최종 목적지(로컬 절대경로)에 압축을 풉니다
+(zip/cbz만 지원 - rar 등은 미지원). 압축 해제는 rclone이 할 수 있는 일이
+아니라서 다운로드까지만 rclone(subprocess)에 맡기고, 그 다음 단계는 순수
+파이썬으로 처리합니다. 자세한 것은 아래 "다운로드 후 압축 해제" 절 참고.
 """
 
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import threading
 import time
 import urllib.request
 import uuid
+import zipfile
 from configparser import ConfigParser
 
 PLUGIN_ID = "rclone_g2g_copy"
@@ -365,18 +370,106 @@ def _maybe_explain_config_save_error(line):
     )
 
 
+# ---------------------------------------------------------------------------
+# 다운로드 후 압축 해제 (file_extract 모드) 관련 헬퍼
+#
+# rclone은 전송(복사/이동/동기화) 전용 도구라 압축 해제 기능이 없다. 그래서
+# 이 모드는 "다운로드는 rclone(backend copyid)으로, 압축 해제는 파이썬
+# zipfile로"라는 2단계로 나눠서 동작한다:
+#   1) rclone backend copyid로 이 job 전용 스테이징 폴더(임시 경로)에 원본
+#      압축파일을 내려받는다 (구글 드라이브 -> 서버 로컬).
+#   2) 다운로드가 끝나면 그 파일을 zipfile로 최종 목적지(로컬 절대경로)에
+#      풀어놓고, 스테이징 폴더는 정리한다.
+# ---------------------------------------------------------------------------
+
+_SUPPORTED_ARCHIVE_EXTS = {".zip", ".cbz"}
+
+# rclone 다운로드가 임시로 거쳐가는 스테이징 폴더 - job_state.json/job.log와
+# 같은 DATA_DIR(코드와 분리된, 업데이트해도 보존되는 데이터 경로) 아래에 둔다.
+_STAGING_ROOT = os.path.join(DATA_DIR, "staging")
+
+
+def _staging_dir_for_job(job_id):
+    return os.path.join(_STAGING_ROOT, job_id)
+
+
+def _cleanup_staging_dir(staging_dir):
+    """스테이징 폴더를 통째로 제거한다. 정리 실패가 job 성공/실패 판정에
+    영향을 주면 안 되므로 예외를 조용히 삼킨다."""
+    try:
+        if staging_dir and os.path.isdir(staging_dir):
+            shutil.rmtree(staging_dir, ignore_errors=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _find_single_downloaded_file(staging_dir):
+    """스테이징 폴더(이 job 전용으로 새로 만든 빈 폴더) 안에 다운로드된 파일이
+    정확히 1개인지 확인하고 경로를 반환한다. 0개/2개 이상이면 (None, 에러메시지)."""
+    try:
+        entries = [
+            os.path.join(staging_dir, name)
+            for name in os.listdir(staging_dir)
+            if os.path.isfile(os.path.join(staging_dir, name))
+        ]
+    except FileNotFoundError:
+        return None, "다운로드 폴더를 찾을 수 없습니다."
+
+    if len(entries) == 0:
+        return None, "다운로드된 파일을 찾을 수 없습니다 (rclone은 성공했다고 보고했지만 파일이 없습니다)."
+    if len(entries) > 1:
+        return None, f"다운로드 폴더에 파일이 {len(entries)}개 있어 어느 것을 압축 해제할지 알 수 없습니다."
+    return entries[0], None
+
+
+def _extract_archive(archive_path, dest_dir):
+    """zip/cbz 압축파일 하나를 dest_dir에 풀어놓는다.
+
+    반환: (True, 압축 해제된 항목 수) 또는 (False, 에러 메시지)
+
+    zip slip(압축파일 안의 상대경로가 '../' 등으로 목적지 바깥을 가리키는
+    공격) 방지를 위해, 실제로 풀기 전에 모든 항목의 최종 경로가 dest_dir
+    내부인지 먼저 전부 검증한다.
+    """
+    ext = os.path.splitext(archive_path)[1].lower()
+    if ext not in _SUPPORTED_ARCHIVE_EXTS and not zipfile.is_zipfile(archive_path):
+        return False, (
+            f"지원하지 않는 압축 형식입니다 ({ext or '확장자 없음'}). "
+            "현재는 zip/cbz(zip 포맷)만 자동 압축 해제를 지원합니다."
+        )
+
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+        dest_real = os.path.realpath(dest_dir)
+        with zipfile.ZipFile(archive_path) as zf:
+            names = zf.namelist()
+            for member in names:
+                target_real = os.path.realpath(os.path.join(dest_dir, member))
+                if target_real != dest_real and not target_real.startswith(dest_real + os.sep):
+                    return False, f"압축 해제 중단: 안전하지 않은 경로가 포함되어 있습니다 ({member})"
+            zf.extractall(dest_dir)
+        return True, len(names)
+    except zipfile.BadZipFile as e:
+        return False, f"압축 해제 실패 (손상되었거나 zip 포맷이 아닌 파일일 수 있음): {e}"
+    except Exception as e:  # noqa: BLE001
+        return False, f"압축 해제 실패: {e}"
+
+
+def _kind_label(source_kind):
+    return {"folder": "폴더 복사", "file": "파일 복사", "file_extract": "압축 해제"}.get(source_kind, "복사")
+
+
 def _run_job(job_id, rclone_path, config_path, rclone_remote, source_id, dest_folder_name,
-             discord_webhook_url=None, transfers=8, checkers=16, fast_list=True, source_kind="folder"):
+             discord_webhook_url=None, transfers=8, checkers=16, fast_list=True, source_kind="folder",
+             keep_archive_after_extract=False):
     global _CONFIG_SAVE_HINT_SHOWN
     _CONFIG_SAVE_HINT_SHOWN = False  # 새 job마다 힌트를 다시 보여줄 수 있게 초기화
 
     source_kind = (source_kind or "folder").strip().lower()
-    if source_kind not in ("folder", "file"):
+    if source_kind not in ("folder", "file", "file_extract"):
         source_kind = "folder"
 
-    # dest_folder_name은 start_copy_job()에서 이미 kind에 맞게 정규화되어
-    # 들어온다 (file 모드는 끝에 '/'가 보장됨 - 아래 start_copy_job 참고).
-    dest_path = f"{rclone_remote}:{dest_folder_name}"
+    staging_dir = None  # file_extract 모드에서만 쓰이고, 끝에서 정리된다.
 
     if source_kind == "file":
         # 개별 파일(압축파일 1개)은 root_folder_id 트릭이 통하지 않는다 -
@@ -392,6 +485,7 @@ def _run_job(job_id, rclone_path, config_path, rclone_remote, source_id, dest_fo
         # copyid' command", rclone 공식 포럼 확인 완료). 내부적으로는
         # operations.Copy()를 그대로 쓰므로 --progress 통계 라인은 폴더
         # 모드와 동일하게 찍힌다.
+        dest_path = f"{rclone_remote}:{dest_folder_name}"
         cmd = [
             rclone_path,
             "backend",
@@ -405,8 +499,42 @@ def _run_job(job_id, rclone_path, config_path, rclone_remote, source_id, dest_fo
         ]
         source_line = f"[*] 소스 파일 ID      : {source_id}"
         mode_line = "[*] 복사 방식         : 개별 파일 (rclone backend copyid)"
-    else:
+        final_dest_display = dest_path
+
+    elif source_kind == "file_extract":
+        # 개별 파일을 서버 로컬 스테이징 폴더로 내려받은 뒤(rclone backend
+        # copyid), 압축을 해제해서 dest_folder_name(로컬 절대경로) 아래에
+        # 풀어놓는다. 다운로드는 이 job 전용의 빈 폴더로 받으므로, 나중에
+        # "다운로드된 파일이 정확히 1개인지"를 명확하게 확인할 수 있다
+        # (최종 목적지 폴더에 이미 다른 파일이 있어도 영향받지 않음).
+        staging_dir = _staging_dir_for_job(job_id)
+        try:
+            os.makedirs(staging_dir, exist_ok=True)
+        except Exception as e:  # noqa: BLE001
+            _append_log_line(f"\n[-] 임시 다운로드 폴더 생성 실패: {e}")
+            _update_state(status="error", returncode=None, finished_at=time.time(), pid=None, progress={})
+            return
+
+        staging_dest = staging_dir.rstrip("/") + "/"
+        dest_path = staging_dest  # rclone에게는 이 스테이징 경로가 "목적지"
+        cmd = [
+            rclone_path,
+            "backend",
+            "copyid",
+            f"{rclone_remote}:",
+            source_id,
+            staging_dest,
+            "--config",
+            config_path,
+            "--progress",
+        ]
+        source_line = f"[*] 소스 파일 ID      : {source_id}"
+        mode_line = "[*] 복사 방식         : 다운로드 후 압축 해제 (rclone backend copyid → zip 추출)"
+        final_dest_display = dest_folder_name  # 로그/알림에는 최종 압축 해제 폴더를 보여준다
+
+    else:  # "folder"
         source_path = f"{rclone_remote},root_folder_id={source_id}:"
+        dest_path = f"{rclone_remote}:{dest_folder_name}"
 
         # 기본값(rclone: --transfers=4, --checkers=8)만으로는 구글 드라이브
         # 서버사이드 복사(파일마다 독립적인 API 호출) 성능이 잘 안 나오는 경우가
@@ -435,15 +563,19 @@ def _run_job(job_id, rclone_path, config_path, rclone_remote, source_id, dest_fo
             f"[*] 동시성            : --transfers={transfers} --checkers={checkers}"
             + (" --fast-list" if fast_list else "")
         )
+        final_dest_display = dest_path
 
     _append_log_line("=" * 60)
     _append_log_line(f"[*] Rclone 경로       : {rclone_path}")
     _append_log_line(f"[*] Config 파일 경로  : {config_path}")
     _append_log_line(source_line)
-    _append_log_line(f"[*] 목적지 경로       : {dest_path}")
+    _append_log_line(f"[*] 목적지 경로       : {final_dest_display}")
     _append_log_line(mode_line)
     _append_log_line("=" * 60)
-    _append_log_line("[*] 서버사이드 복사를 시작합니다...\n")
+    if source_kind == "file_extract":
+        _append_log_line("[*] 다운로드를 시작합니다...\n")
+    else:
+        _append_log_line("[*] 서버사이드 복사를 시작합니다...\n")
 
     returncode = None
     process = None
@@ -483,15 +615,49 @@ def _run_job(job_id, rclone_path, config_path, rclone_remote, source_id, dest_fo
 
     state = _read_state() or {}
     cancelled = bool(state.get("cancel_requested"))
+    transfer_ok = (not cancelled and returncode == 0)
+
+    extract_error = None
+    extracted_count = None
+
+    if source_kind == "file_extract" and transfer_ok:
+        # 다운로드까지는 성공했으니 이제 스테이징 폴더 안의 파일을 압축
+        # 해제한다. 이 단계의 성공/실패가 최종 job 상태를 결정한다.
+        staged_file, find_error = _find_single_downloaded_file(staging_dir)
+        if find_error:
+            transfer_ok = False
+            extract_error = find_error
+        else:
+            _append_log_line(f"\n[*] 압축 해제 중: {os.path.basename(staged_file)} → {dest_folder_name}")
+            ok, result = _extract_archive(staged_file, dest_folder_name)
+            if ok:
+                extracted_count = result
+                if keep_archive_after_extract:
+                    try:
+                        archive_dest = os.path.join(dest_folder_name, os.path.basename(staged_file))
+                        shutil.move(staged_file, archive_dest)
+                        _append_log_line(f"[i] 원본 압축파일 보관: {archive_dest}")
+                    except Exception as e:  # noqa: BLE001
+                        _append_log_line(f"[!] 원본 압축파일 보관 실패(무시하고 계속): {e}")
+            else:
+                transfer_ok = False
+                extract_error = result
 
     if cancelled:
         status = "cancelled"
-        _append_log_line("\n[-] 사용자 요청으로 복사가 중단되었습니다.")
-        notify_text = f"⏹️ **[BookOasis] 폴더 복사 중단됨**\n목적지: `{dest_path}`"
-    elif returncode == 0:
+        _append_log_line("\n[-] 사용자 요청으로 중단되었습니다.")
+        notify_text = f"⏹️ **[BookOasis] {_kind_label(source_kind)} 중단됨**\n목적지: `{final_dest_display}`"
+    elif source_kind == "file_extract" and extract_error:
+        status = "error"
+        _append_log_line(f"\n[-] {extract_error}")
+        notify_text = f"❌ **[BookOasis] 압축 해제 실패**\n목적지: `{final_dest_display}`\n사유: {extract_error}"
+    elif returncode == 0 and transfer_ok:
         status = "success"
-        _append_log_line("\n[+] 서버사이드 복사가 성공적으로 완료되었습니다!")
-        notify_text = f"✅ **[BookOasis] 폴더 복사 완료**\n목적지: `{dest_path}`"
+        if source_kind == "file_extract":
+            _append_log_line(f"\n[+] 다운로드 + 압축 해제가 모두 완료되었습니다! ({extracted_count}개 항목)")
+        else:
+            _append_log_line("\n[+] 서버사이드 복사가 성공적으로 완료되었습니다!")
+        notify_text = f"✅ **[BookOasis] {_kind_label(source_kind)} 완료**\n목적지: `{final_dest_display}`"
         progress["percent"] = 100  # rclone의 마지막 갱신이 100%를 안 찍고 끝나는 경우 대비
         if progress.get("files_total"):
             progress["files_done"] = progress["files_total"]
@@ -499,7 +665,17 @@ def _run_job(job_id, rclone_path, config_path, rclone_remote, source_id, dest_fo
     else:
         status = "error"
         _append_log_line(f"\n[-] 복사 중 오류가 발생했습니다. (종료 코드: {returncode})")
-        notify_text = f"❌ **[BookOasis] 폴더 복사 실패** (종료 코드: {returncode})\n목적지: `{dest_path}`"
+        notify_text = f"❌ **[BookOasis] {_kind_label(source_kind)} 실패** (종료 코드: {returncode})\n목적지: `{final_dest_display}`"
+
+    if staging_dir:
+        if status == "success" or status == "cancelled":
+            _cleanup_staging_dir(staging_dir)
+        else:
+            # 실패 시에는 스테이징 폴더를 남겨둔다 - 이미 받아둔 원본 파일을
+            # 사용자가 서버에서 직접 확인하거나 수동으로 옮길 수 있게 하기 위함
+            # (다음 job 시작 시 이전 job의 스테이징 폴더는 job_id가 달라 서로
+            # 겹치지 않으므로 그대로 두어도 안전함).
+            _append_log_line(f"[i] 실패 시 받아둔 파일은 보존됩니다: {staging_dir}")
 
     _update_state(status=status, returncode=returncode, finished_at=time.time(), pid=None, progress=progress)
     _notify_discord(discord_webhook_url, notify_text)
@@ -507,19 +683,25 @@ def _run_job(job_id, rclone_path, config_path, rclone_remote, source_id, dest_fo
 
 def start_copy_job(rclone_path, config_path, rclone_remote, source_folder_url, dest_folder_name,
                     source_url_input=None, dest_input=None, discord_webhook_url=None,
-                    transfers=8, checkers=16, fast_list=True, source_kind="folder"):
+                    transfers=8, checkers=16, fast_list=True, source_kind="folder",
+                    keep_archive_after_extract=False):
     """
-    유효성 검사 후 백그라운드 스레드로 rclone copy(또는 backend copyid)를 시작합니다.
-    이미 실행 중인(그리고 실제로 살아있는) job이 있으면 거부합니다.
+    유효성 검사 후 백그라운드 스레드로 rclone copy(또는 backend copyid, 또는
+    다운로드+zip 압축 해제)를 시작합니다. 이미 실행 중인(그리고 실제로
+    살아있는) job이 있으면 거부합니다.
 
-    source_kind: "folder"(기본, 폴더 전체를 rclone copy로 복사) 또는
-    "file"(개별 압축파일 1개를 `rclone backend copyid`로 복사). 이 값에 따라
-    URL/ID 추출 규칙과 실제 rclone 명령이 달라진다 (자세한 것은 _run_job 참고).
-    file 모드에서는 목적지 경로 끝에 '/'를 보장해, rclone이 원본 파일명을
-    그대로 써서 그 디렉터리 아래에 저장하도록 만든다 (경로 끝에 슬래시가
-    없으면 copyid는 그 문자열 자체를 새 파일명으로 해석하므로, 사용자가
-    입력한 "목적지 폴더 경로"라는 화면 문구와 어긋나지 않도록 여기서 슬래시를
-    항상 붙인다).
+    source_kind:
+      - "folder"(기본): 폴더 전체를 rclone copy(root_folder_id 트릭)로 복사.
+        dest_folder_name은 rclone 원격 경로("remote:path")의 path 부분.
+      - "file": 개별 압축파일 1개를 `rclone backend copyid`로 그대로 복사
+        (구글 드라이브 -> 구글 드라이브). dest_folder_name도 rclone 원격 경로.
+        목적지 경로 끝에 '/'를 보장해, rclone이 원본 파일명을 그대로 써서
+        그 디렉터리 아래에 저장하도록 만든다.
+      - "file_extract": 개별 압축파일 1개를 서버 로컬 스테이징 폴더로 먼저
+        내려받은 뒤(`rclone backend copyid`), 파이썬 zipfile로 압축을 풀어
+        dest_folder_name(**서버의 로컬 절대경로** - rclone 경로가 아님) 아래에
+        저장한다. zip/cbz만 지원. keep_archive_after_extract가 True면 압축
+        해제 후 원본 압축파일도 그 폴더에 함께 남겨두고, False(기본)면 정리한다.
 
     source_url_input / dest_input: 변환 전, 사용자가 화면에 실제로 타이핑한 원본
     값(소스는 URL 그대로, 목적지는 마운트 경로일 수도 있는 원본). 새로고침 시
@@ -538,7 +720,7 @@ def start_copy_job(rclone_path, config_path, rclone_remote, source_folder_url, d
     dest_folder_name = (dest_folder_name or "").strip()
 
     source_kind = (source_kind or "folder").strip().lower()
-    if source_kind not in ("folder", "file"):
+    if source_kind not in ("folder", "file", "file_extract"):
         source_kind = "folder"
 
     try:
@@ -553,7 +735,7 @@ def start_copy_job(rclone_path, config_path, rclone_remote, source_folder_url, d
     if not rclone_path or not config_path or not rclone_remote:
         raise ConfigError("RCLONE_PATH / CONFIG_PATH / RCLONE_REMOTE가 설정되지 않았습니다. 설정 화면에서 먼저 저장해주세요.")
     if not dest_folder_name:
-        raise ValueError("목적지 폴더 경로를 입력해주세요.")
+        raise ValueError("목적지 경로를 입력해주세요.")
 
     _validate_config(rclone_path, config_path)
     if source_kind == "file":
@@ -561,9 +743,20 @@ def start_copy_job(rclone_path, config_path, rclone_remote, source_folder_url, d
         # copyid는 목적지 경로 끝의 '/' 유무로 "디렉터리 안에 원본 파일명대로
         # 저장" 여부를 판단하므로, 항상 슬래시를 보장해 원본 파일명을 유지한다.
         dest_folder_name_for_job = dest_folder_name.rstrip("/") + "/"
+        dest_path_display = f"{rclone_remote}:{dest_folder_name_for_job}"
+    elif source_kind == "file_extract":
+        source_id = get_file_id(source_folder_url)
+        # 이 모드는 rclone 원격 경로가 아니라 "서버 로컬 절대경로"를 받는다 -
+        # 압축을 풀어놓을 실제 디스크 위치이기 때문. 상대경로/마운트 경로가
+        # 섞여 들어오면 엉뚱한 곳에 풀릴 수 있으므로 절대경로만 허용한다.
+        if not dest_folder_name.startswith("/"):
+            raise ValueError("압축 해제 목적지는 서버의 로컬 절대경로여야 합니다 (예: /data/comics/시리즈명).")
+        dest_folder_name_for_job = dest_folder_name.rstrip("/") or "/"
+        dest_path_display = dest_folder_name_for_job
     else:
         source_id = get_folder_id(source_folder_url)
         dest_folder_name_for_job = dest_folder_name
+        dest_path_display = f"{rclone_remote}:{dest_folder_name_for_job}"
 
     existing = _read_state()
     if existing and existing.get("status") == "running" and _process_is_alive(existing.get("pid")):
@@ -581,7 +774,7 @@ def start_copy_job(rclone_path, config_path, rclone_remote, source_folder_url, d
         "finished_at": None,
         "source_id": source_id,
         "source_kind": source_kind,
-        "dest_path": f"{rclone_remote}:{dest_folder_name_for_job}",
+        "dest_path": dest_path_display,
         # 새로고침 시 입력창 복원용 원본 값
         "source_url_input": (source_url_input or source_folder_url or "").strip(),
         "dest_input": (dest_input or dest_folder_name or "").strip(),
@@ -591,7 +784,7 @@ def start_copy_job(rclone_path, config_path, rclone_remote, source_folder_url, d
     thread = threading.Thread(
         target=_run_job,
         args=(job_id, rclone_path, config_path, rclone_remote, source_id, dest_folder_name_for_job,
-              discord_webhook_url, transfers, checkers, fast_list, source_kind),
+              discord_webhook_url, transfers, checkers, fast_list, source_kind, keep_archive_after_extract),
         daemon=True,
     )
     thread.start()

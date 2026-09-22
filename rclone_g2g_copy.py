@@ -27,7 +27,19 @@ guide_plugins.md 2장 "서브프로세스 실행 차단(기본값)" 규칙에 �
 .env에 ALLOW_PLUGIN_SUBPROCESS=true를 설정하지 않으면 이 플러그인은 로드 자체가
 거부됩니다. (→ 이 배포 환경에서는 이미 설정 완료됨)
 
-변경 이력(이번 수정, v2.32.1 — 핫픽스):
+변경 이력(이번 수정, v2.33.0):
+- **다운로드 후 압축 해제("file_extract") 모드를 새로 추가했습니다.** rclone은
+  전송(복사) 전용 도구라 압축 해제 기능이 없으므로, ① rclone backend copyid로
+  개별 압축파일을 서버 로컬 스테이징 폴더에 내려받고 ② 파이썬 표준 라이브러리
+  zipfile로 최종 목적지(서버 로컬 절대경로)에 압축을 푸는 2단계로 구현했습니다
+  (zip/cbz만 지원, zip slip 방지 검증 포함). 소스 종류 라디오에 "📦→📂 다운로드 +
+  압축 해제"가 추가됐고, 이 모드에서는 "목적지 경로"가 rclone 원격 경로가
+  아니라 서버의 로컬 절대경로를 의미합니다(마운트 접두사 변환 미적용). 설정에
+  KEEP_ARCHIVE_AFTER_EXTRACT(선택, 기본 꺼짐)를 추가해 압축 해제 후 원본
+  압축파일을 목적지 폴더에 함께 남겨둘지 고를 수 있습니다. 자세한 것은
+  logic.py의 "다운로드 후 압축 해제 (file_extract 모드) 관련 헬퍼" 절 참고.
+
+변경 이력(v2.32.1 — 핫픽스):
 - **v2.32.0에서 추가한 개별 파일 복사가 실제로는 동작하지 않는 버그를
   수정했습니다.** `rclone copyid ...`로 호출했는데, 실사용 환경에서
   `Error: unknown command "copyid" for "rclone"`로 실패하는 것을 확인함 -
@@ -157,6 +169,12 @@ class RcloneG2gCopyProvider(BaseMetadataProvider):
                 {"value": "false", "label": "꺼짐 (메모리가 매우 부족한 환경에서만)"},
             ],
         },
+        {
+            "key": "KEEP_ARCHIVE_AFTER_EXTRACT",
+            "label": "압축 해제 후 원본 압축파일도 목적지 폴더에 함께 보관 ('다운로드 후 압축 해제' 모드 전용)",
+            "type": "checkbox",
+            "default": False,
+        },
     ]
 
     update_manifest = {
@@ -261,23 +279,34 @@ class RcloneG2gCopyProvider(BaseMetadataProvider):
     def _start_copy(self, db_type, item_data):
         source_url = str(item_data.get("source_url", "")).strip()
         dest_input = str(item_data.get("dest_folder_name", "")).strip()
-        # "folder"(기존 폴더 전체 복사) 또는 "file"(개별 압축파일 1개 복사).
+        # "folder"(폴더 전체 복사) / "file"(개별 압축파일 1개 그대로 복사) /
+        # "file_extract"(개별 압축파일 1개를 다운로드 후 로컬에 압축 해제).
         # index.html의 라디오 버튼에서 선택되어 넘어온다 - 생략되면 하위 호환을
         # 위해 기존 동작(folder)을 그대로 유지한다.
         source_kind = str(item_data.get("source_kind", "folder")).strip().lower()
-        if source_kind not in ("folder", "file"):
+        if source_kind not in ("folder", "file", "file_extract"):
             source_kind = "folder"
 
         if not source_url:
-            if source_kind == "file":
-                return False, "소스 파일 URL(또는 ID)을 입력해주세요."
-            return False, "소스 폴더 URL(또는 ID)을 입력해주세요."
+            if source_kind == "folder":
+                return False, "소스 폴더 URL(또는 ID)을 입력해주세요."
+            return False, "소스 파일 URL(또는 ID)을 입력해주세요."
         if not dest_input:
+            if source_kind == "file_extract":
+                return False, "압축 해제 목적지(로컬 절대경로)를 입력해주세요."
             return False, "목적지 경로를 입력해주세요."
 
         config = self._get_config(db_type)
-        mount_prefix = resolve_mount_prefix(config.get("MOUNT_PREFIX"), config.get("RCLONE_REMOTE"))
-        dest_folder_name = to_rclone_relative_path(dest_input, mount_prefix)
+
+        if source_kind == "file_extract":
+            # 이 모드의 목적지는 rclone 원격 경로가 아니라 "서버 로컬
+            # 절대경로"이므로, 마운트 접두사 변환(to_rclone_relative_path)을
+            # 적용하지 않고 사용자가 입력한 값을 그대로 넘긴다. 절대경로
+            # 검증(맨 앞이 '/')은 logic.start_copy_job()에서 한 번 더 한다.
+            dest_folder_name = dest_input
+        else:
+            mount_prefix = resolve_mount_prefix(config.get("MOUNT_PREFIX"), config.get("RCLONE_REMOTE"))
+            dest_folder_name = to_rclone_relative_path(dest_input, mount_prefix)
 
         try:
             start_copy_job(
@@ -293,13 +322,16 @@ class RcloneG2gCopyProvider(BaseMetadataProvider):
                 checkers=config.get("RCLONE_CHECKERS"),
                 fast_list=str(config.get("RCLONE_FAST_LIST", "true")).lower() != "false",
                 source_kind=source_kind,
+                keep_archive_after_extract=bool(config.get("KEEP_ARCHIVE_AFTER_EXTRACT")),
             )
         except ConfigError as e:
             return False, str(e)
         except (ValueError, RuntimeError) as e:
             return False, str(e)
 
-        kind_label = "파일" if source_kind == "file" else "폴더"
+        kind_label = {"folder": "폴더", "file": "파일", "file_extract": "압축 해제"}[source_kind]
+        if source_kind == "file_extract":
+            return True, "다운로드 및 압축 해제를 시작했습니다. 진행 상황은 화면 하단 로그에서 확인하세요."
         if dest_folder_name != dest_input:
             return True, (
                 f"{kind_label} 복사를 시작했습니다. "

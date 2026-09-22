@@ -6,6 +6,12 @@
 `scan_scheduler.py`/`script.js` 실제 소스를 참고해, 커스텀 Flask Blueprint 없이
 **BaseMetadataProvider 표준 계약(search/apply/get_dashboard_data)만으로** 동작합니다.
 
+> **v2.33.0 변경 사항**: **"다운로드 후 압축 해제" 모드를 추가했습니다.** rclone은
+> 전송(복사) 전용 도구라 압축 해제 기능이 자체적으로 없으므로, ① 개별 압축파일을
+> `rclone backend copyid`로 서버 로컬 스테이징 폴더에 내려받고 ② 파이썬 표준
+> 라이브러리 `zipfile`로 최종 목적지(서버 로컬 절대경로)에 압축을 푸는 2단계로
+> 구현했습니다(zip/cbz만 지원). 자세한 것은 아래 "다운로드 후 압축 해제" 절 참고.
+
 > **v2.32.1 변경 사항 (핫픽스)**: v2.32.0에서 추가한 개별 파일 복사가 실제로는
 > 동작하지 않는 버그를 수정했습니다. `rclone copyid ...`로 호출했는데
 > 실사용 환경에서 `Error: unknown command "copyid" for "rclone"`로 실패하는
@@ -27,20 +33,76 @@
 >    부분이 이제 fail-closed로 통일됩니다).
 
 > **v2.31.0 변경 사항**: Google Apps Script(GAS) 백엔드를 완전히 제거했습니다
-> (`gas_logic.py`, `gas/Code.gs` 삭제, 카테고리탭의 방식 선택 체크박스 삭제).
-> 이제 rclone 단일 백엔드로만 동작합니다. 또한 설정 조회 헬퍼를
-> `self.get_plugin_config(db_type, default=...)`로 수정하고, `update_manifest.raw_base_url`을
-> 실제 저장소(`mygarakuta/rclone_g2g_copy`)로 바로잡았습니다.
+> (`gas_logic.py`, `gas/Code.gs` 삭제, 카테고리탭의 방식 선택 체크박스 삭제,
+> 설정 화면에 남아있던 `GAS_WEBAPP_URL`/`GAS_SHARED_SECRET` 잔여 필드도
+> v2.33.0에서 뒤늦게 정리했습니다). 이제 rclone 단일 백엔드로만 동작합니다.
+> 또한 설정 조회 헬퍼를 `self.get_plugin_config(db_type, default=...)`로
+> 수정하고, `update_manifest.raw_base_url`을 실제 저장소
+> (`mygarakuta/rclone_g2g_copy`)로 바로잡았습니다.
 
 ## 화면 구성
 
 - **설정(모달, settings.html)**: `RCLONE_PATH` / `CONFIG_PATH` / `RCLONE_REMOTE` /
   `MOUNT_PREFIX`(선택) / `DISCORD_WEBHOOK_URL`(선택) / `RCLONE_TRANSFERS` /
-  `RCLONE_CHECKERS` / `RCLONE_FAST_LIST` — `config_schema`에 선언된 필드와 1:1 대응.
-- **카테고리탭(사이드바 전체 화면, index.html)**: 소스 종류(폴더/개별 파일)
-  라디오, 소스(URL/ID), 목적지 경로, [복사 시작]/[중단] 버튼, 진행률 바,
-  실시간 로그.
+  `RCLONE_CHECKERS` / `RCLONE_FAST_LIST` / `KEEP_ARCHIVE_AFTER_EXTRACT`(선택) —
+  `config_schema`에 선언된 필드와 1:1 대응.
+- **카테고리탭(사이드바 전체 화면, index.html)**: 소스 종류(폴더 전체/개별
+  파일/다운로드+압축해제) 라디오, 소스(URL/ID), 목적지 경로, [복사 시작]/[중단]
+  버튼, 진행률 바, 실시간 로그.
 - 이 플러그인은 `admin_only = True`라 **관리자 계정에만** 사이드바에 노출됩니다.
+
+## 다운로드 후 압축 해제 (v2.33.0)
+
+**요청 배경**: 폴더/개별 파일 복사는 둘 다 구글 드라이브 -> 구글 드라이브
+서버사이드 복사였습니다. 이번엔 "구글 드라이브의 압축파일을 받아서, 압축을
+해제한 상태로 서버 라이브러리 폴더에 넣어달라"는 요청이라 완전히 다른
+파이프라인이 필요했습니다 — **rclone은 전송(복사/동기화) 전용 도구라 압축
+해제 기능 자체가 없기** 때문입니다. 그래서 "다운로드는 rclone(요청하신 대로
+rclone 사이드), 압축 해제는 파이썬 표준 라이브러리"로 역할을 나눴습니다.
+
+카테고리탭 "소스 종류"에 세 번째 옵션 **📦→📂 다운로드 + 압축 해제**가
+추가됐습니다. 이 모드를 고르면:
+
+1. 소스는 개별 파일 모드와 동일하게 구글 드라이브 **파일** 공유 링크
+   (`.../file/d/ID/view`, `.../open?id=ID` 등) 또는 파일 ID를 입력합니다.
+2. **목적지 경로의 의미가 다른 두 모드와 다릅니다.** 폴더/개별 파일 모드의
+   목적지는 rclone 원격 경로(`remote:path`, 즉 구글 드라이브 안의 위치)인
+   반면, 이 모드의 목적지는 **서버(컨테이너)의 로컬 절대경로**입니다(예:
+   `/data/comics/시리즈명/화명`) — 마운트 접두사 변환(`MOUNT_PREFIX`)도
+   적용되지 않고, 반드시 `/`로 시작해야 합니다. 화면에서도 라벨/플레이스홀더/
+   미리보기 문구가 이 모드에서는 자동으로 바뀝니다.
+3. 서버는 `rclone backend copyid`로 그 파일을 **이 job 전용의 임시 스테이징
+   폴더**(`./plugins/data/rclone_g2g_copy/staging/<job_id>/`, 코드와 분리된
+   데이터 경로 아래)로 내려받습니다.
+4. 다운로드가 끝나면 파이썬 표준 라이브러리 `zipfile`로 그 파일을 목적지
+   폴더에 풀어놓습니다. **zip/cbz(zip 포맷)만 지원**하며, 그 외 형식(rar 등)은
+   다운로드는 성공해도 "지원하지 않는 압축 형식입니다"로 명확히 실패 처리됩니다
+   (스테이징 폴더에 원본은 보존되므로 수동으로 옮겨 쓸 수 있음).
+5. 압축 해제까지 성공하면 스테이징 폴더(원본 zip 포함)는 자동으로 정리됩니다.
+   설정의 **KEEP_ARCHIVE_AFTER_EXTRACT**를 켜두면, 삭제 대신 원본 압축파일을
+   목적지 폴더 안에 함께 남겨둡니다.
+6. **실패 시(압축 해제 실패 포함)에는 스테이징 폴더를 삭제하지 않고 그대로
+   남겨둡니다** — 이미 받아둔 원본 파일을 서버에서 직접 확인하거나 수동으로
+   옮길 수 있도록 하기 위함이며, 실행 로그에 그 경로가 표시됩니다.
+
+보안: 압축 해제 전 모든 압축 항목의 최종 경로가 목적지 폴더 내부인지 미리
+전부 검증합니다 — 이른바 "zip slip" 공격(`../../etc/passwd`처럼 압축 안의
+상대경로로 목적지 바깥에 파일을 쓰는 수법)을 막기 위함입니다. 안전하지 않은
+항목이 하나라도 있으면 아무것도 풀지 않고 실패 처리합니다.
+
+다른 모드와 공유하는 부분: 취소 버튼(다운로드 단계에서는 폴더/파일 모드와
+동일하게 PID SIGTERM으로 즉시 중단됨 - 단, 압축 해제 단계에 들어간 뒤에는
+파일 하나 압축을 푸는 짧은 작업이라 별도 취소 지점을 두지 않았습니다), 강제
+초기화, 디스코드 완료/실패/중단 알림, 새로고침 시 입력창(및 소스 종류 라디오)
+복원, 진행률 바(다운로드 구간만 반영 - 압축 해제 자체는 보통 수 초 이내라
+별도 진행률 없이 로그로만 "압축 해제 중..." → "압축 해제 완료: N개 항목"이
+표시됩니다)가 전부 동일하게 동작합니다.
+
+**BookOasis 스캐너와의 연결**: 압축을 푼 결과물은 폴더(이미지 파일들) 형태가
+되므로, 이 목적지 경로가 BookOasis 라이브러리의 `physical_path` 하위라면
+스캔 시 `imgdir` 포맷 도서로 인식됩니다 (docs 참고). 이 플러그인은 스캔을
+자동으로 트리거하지 않으므로, 압축 해제가 끝난 뒤에는 평소처럼 라이브러리
+재스캔(전체 스캔 또는 관리자 세션으로 `scan-path` API 호출)을 실행해주세요.
 
 ## 개별 압축파일 1개만 복사하기 (v2.32.0)
 
@@ -50,7 +112,7 @@
 서버사이드 복사했습니다. 이 트릭은 **폴더 전용**이라 개별 파일 하나만 복사할
 때는 쓸 수 없었습니다.
 
-이제 카테고리탭 상단에 **"소스 종류"** 라디오 버튼이 생겼습니다:
+카테고리탭 상단의 **"소스 종류"** 라디오 버튼 중:
 
 - **📁 폴더 전체** (기본값, 기존 동작 그대로): 구글 드라이브 폴더 공유 링크
   또는 폴더 ID 입력 → `rclone copy remote,root_folder_id=<폴더ID>: remote:목적지경로`
@@ -59,34 +121,38 @@
   remote:목적지경로/` (rclone Google Drive 백엔드 전용 ID 기반 단일 파일 복사
   명령 — 독립 명령이 아니라 `backend` 서브커맨드로 호출해야 한다는 점에
   주의). 목적지 경로 끝에 항상 `/`를 붙여서 호출하므로, rclone이 원본
-  파일명을 그대로 써서 그 폴더 아래에 저장합니다 - "목적지 경로"는 두 모드
-  모두 항상 **폴더** 경로를 뜻합니다(개별 파일 모드에서도 파일명을 따로
-  입력할 필요 없음).
+  파일명을 그대로 써서 그 폴더 아래에 저장합니다 - "목적지 경로"는 이 두
+  모드 모두 항상 **rclone 원격의 폴더** 경로를 뜻합니다(개별 파일 모드에서도
+  파일명을 따로 입력할 필요 없음). 세 번째 모드(다운로드+압축 해제)는 목적지
+  의미가 다르므로 위 절을 참고하세요.
 
 동작 방식:
 
 - 소스 입력창에 URL을 붙여넣으면 `script.js`가 URL 패턴(`/folders/` vs
-  `/file/d/` 또는 `?id=`)을 보고 라디오를 **자동으로 맞춰줍니다** (슬래시 없는
-  순수 ID만 붙여넣은 경우는 폴더/파일 여부를 URL만으로 판단할 수 없어 자동
-  전환하지 않으므로, 이 경우는 라디오를 직접 선택해주세요).
+  `/file/d/` 또는 `?id=`)을 보고 라디오를 **자동으로 맞춰줍니다** (파일 URL을
+  붙여넣었을 때는 현재 "폴더"가 선택되어 있을 때만 "개별 압축파일"로
+  전환하고, 이미 "개별 압축파일"이나 "다운로드+압축 해제"가 선택되어
+  있으면 그대로 둡니다 - 사용자의 명시적 선택을 존중. 슬래시 없는 순수 ID만
+  붙여넣은 경우도 자동 전환하지 않으므로, 이 경우는 라디오를 직접
+  선택해주세요).
 - 라벨/플레이스홀더/안내 문구가 선택한 소스 종류에 맞춰 바뀝니다.
-- `apply(action="start_copy")` 호출 시 `item_data.source_kind`(`"folder"` 또는
-  `"file"`)로 서버에 전달되며, 생략되면 하위 호환을 위해 `"folder"`로
-  동작합니다 (예전 프론트/외부 연동이 이 필드 없이 호출해도 기존과 동일하게
-  작동).
+- `apply(action="start_copy")` 호출 시 `item_data.source_kind`(`"folder"` |
+  `"file"` | `"file_extract"`)로 서버에 전달되며, 생략되면 하위 호환을 위해
+  `"folder"`로 동작합니다 (예전 프론트/외부 연동이 이 필드 없이 호출해도
+  기존과 동일하게 작동).
 - `logic.py`가 `source_kind`에 따라 `get_folder_id()`/`get_file_id()` 중
-  맞는 쪽으로 ID를 추출하고, `_run_job()`이 `rclone copy` 대신 `rclone
-  backend copyid`를 실행합니다. 진행률 파싱(`_parse_progress_line()`)과 로그/
-  취소/강제초기화/디스코드 알림 로직은 두 모드가 완전히 동일하게 공유합니다
-  (`backend copyid`도 내부적으로 표준 전송 엔진을 그대로 쓰므로 `--progress`
-  출력 형식이 같아 별도 분기 불필요).
+  맞는 쪽으로 ID를 추출하고, `_run_job()`이 그에 맞는 rclone 명령을
+  실행합니다. 진행률 파싱(`_parse_progress_line()`)과 로그/취소/강제초기화/
+  디스코드 알림 로직은 세 모드가 공통 코드로 동작합니다.
 - 새로고침 시 입력창뿐 아니라 **소스 종류 라디오도** `job_state.json`에 저장된
   `source_kind`를 읽어 그대로 복원됩니다.
+
 - 복사가 진행 중일 때는 소스 종류 라디오가 잠깁니다(이미 시작된 job에는
   중간에 종류를 바꿔도 반영되지 않으므로 혼동 방지).
 - `RCLONE_TRANSFERS`/`RCLONE_CHECKERS`/`RCLONE_FAST_LIST`(동시성 옵션)는 파일이
-  여러 개 있는 폴더 복사에서만 의미가 있으므로, 개별 파일 복사(`backend
-  copyid`)에는 적용되지 않습니다(파일 1개라 동시성 자체가 무의미).
+  여러 개 있는 폴더 복사에서만 의미가 있으므로, 개별 파일 복사/다운로드
+  (`backend copyid` 사용하는 두 모드)에는 적용되지 않습니다(파일 1개라
+  동시성 자체가 무의미).
 
 ## 디자인이 plugin_board(플러그인게시판)와 한 세트로 보이는 이유
 
@@ -371,10 +437,10 @@ rclone_g2g_copy/
   __init__.py          # provider 노출
   rclone_g2g_copy.py    # BaseMetadataProvider 계약 (search/apply/get_dashboard_data) + category_tab
   logic.py               # rclone 실행/파일 기반 job 상태 관리/중단(PID kill)/rclone.conf 파싱/디스코드 알림
-  settings.html            # 설정 모달 - RCLONE_PATH/CONFIG_PATH/RCLONE_REMOTE(풀다운)/MOUNT_PREFIX/DISCORD_WEBHOOK_URL/RCLONE_TRANSFERS/RCLONE_CHECKERS/RCLONE_FAST_LIST
+  settings.html            # 설정 모달 - RCLONE_PATH/CONFIG_PATH/RCLONE_REMOTE(풀다운)/MOUNT_PREFIX/DISCORD_WEBHOOK_URL/RCLONE_TRANSFERS/RCLONE_CHECKERS/RCLONE_FAST_LIST/KEEP_ARCHIVE_AFTER_EXTRACT
   settings.css              # 설정 모달 스타일
   settings.js                # RCLONE_REMOTE 풀다운 채우기 (rclone.conf 자동 조회)
-  index.html                  # 카테고리탭 전체 화면 - 실행 폼 + 진행률 바 + 로그 + 중단 버튼
+  index.html                  # 카테고리탭 전체 화면 - 소스 종류 라디오 + 실행 폼 + 진행률 바 + 로그 + 중단 버튼
   style.css                    # 카테고리탭 화면 스타일
   script.js                     # 카테고리탭 화면 동작
   requirements.txt               # 빈 파일 (외부 pip 의존성 없음 - unified_book 규칙대로 패키지명만 적는 파일)
@@ -390,6 +456,10 @@ rclone_g2g_copy/
                     #  dest_path, progress, source_url_input, dest_input,
                     #  cancel_requested}
   job.log           # rclone --progress 출력 (한 줄씩)
+  staging/<job_id>/ # file_extract 모드 전용 - 다운로드된 원본 압축파일이
+                    #  잠깐 머무르는 곳. 압축 해제까지 성공하면 자동 삭제되고,
+                    #  실패하면 원본을 보존하기 위해 남겨둔다(다음 job은 새
+                    #  job_id로 별도 폴더를 쓰므로 서로 섞이지 않음).
 ```
 
 ## ⚠️ subprocess 실행에 대한 안내
