@@ -27,7 +27,22 @@ guide_plugins.md 2장 "서브프로세스 실행 차단(기본값)" 규칙에 �
 .env에 ALLOW_PLUGIN_SUBPROCESS=true를 설정하지 않으면 이 플러그인은 로드 자체가
 거부됩니다. (→ 이 배포 환경에서는 이미 설정 완료됨)
 
-변경 이력(이번 수정):
+변경 이력(이번 수정, v2.32.0):
+- 갱신된 guide_plugins.md 반영: subprocess 실행 플러그인 권장 사항에 따라
+  admin_only=True를 추가했습니다 (일반 계정에게는 사이드바 탭/데이터 자체가
+  완전히 숨겨집니다 - 실행 자체는 apply-metadata 라우트가 이미 admin 전용이라
+  기존에도 관리자만 가능했지만, 탭 노출 자체는 이제 fail-closed로 막힙니다).
+- **폴더 단위뿐 아니라 개별 압축파일(zip/cbz 등) 1개 단위 복사를 지원**하도록
+  변경했습니다. index.html에 "소스 종류(폴더/개별 파일)" 라디오 버튼을
+  추가했고, item_data에 source_kind("folder" 기본값 | "file")를 실어 보내면
+  logic.py가 그에 맞춰 다른 rclone 명령을 사용합니다:
+    - 폴더: 기존과 동일하게 root_folder_id 트릭 + `rclone copy`
+    - 개별 파일: 그 트릭이 통하지 않으므로(폴더 전용 트릭) rclone의 ID 기반
+      단일 파일 복사 명령 `rclone copyid remote: <파일ID> <목적지경로>/`를
+      사용합니다(목적지 경로 끝에 '/'를 보장해 원본 파일명을 그대로 유지).
+  자세한 것은 logic.py의 get_file_id() / _run_job() 주석 참고.
+
+변경 이력(v2.31.0):
 - GAS(Google Apps Script) 백엔드를 완전히 제거했습니다. gas_logic.py import,
   GAS_WEBAPP_URL/GAS_SHARED_SECRET 설정 필드, method="gas" 분기, 백엔드 선택
   체크박스 연동(get_dashboard_data의 gas_configured 필드)을 모두 삭제했습니다.
@@ -65,6 +80,15 @@ class RcloneG2gCopyProvider(BaseMetadataProvider):
     id = "rclone_g2g_copy"
     name = "폴더 복사 (rclone G2G)"
     is_searchable = False
+
+    # 갱신된 guide_plugins.md 2장: subprocess로 외부 실행 파일을 직접 실행하는
+    # 플러그인은 admin_only=True로 관리자 외 전원에게 화면/데이터 자체를 숨기는
+    # 것이 권장된다. 이 플러그인은 rclone 실행 파일을 직접 구동하므로 적용한다.
+    # (apply-metadata 라우트 자체가 이미 @admin_required라 실행 자체는 예전에도
+    # 관리자만 가능했지만, admin_only가 없으면 일반 계정에게 사이드바 탭 자체는
+    # 권한 매트릭스 설정에 따라 보일 수 있었다 - admin_only는 그 노출 자체를
+    # fail-closed로 막아준다.)
+    admin_only = True
 
     # 설정 화면(settings.html)과 1:1로 대응되는 필드 목록.
     # (random_gallery/pixiv_ranking 작업에서 확인된 config_schema 형식)
@@ -225,8 +249,16 @@ class RcloneG2gCopyProvider(BaseMetadataProvider):
     def _start_copy(self, db_type, item_data):
         source_url = str(item_data.get("source_url", "")).strip()
         dest_input = str(item_data.get("dest_folder_name", "")).strip()
+        # "folder"(기존 폴더 전체 복사) 또는 "file"(개별 압축파일 1개 복사).
+        # index.html의 라디오 버튼에서 선택되어 넘어온다 - 생략되면 하위 호환을
+        # 위해 기존 동작(folder)을 그대로 유지한다.
+        source_kind = str(item_data.get("source_kind", "folder")).strip().lower()
+        if source_kind not in ("folder", "file"):
+            source_kind = "folder"
 
         if not source_url:
+            if source_kind == "file":
+                return False, "소스 파일 URL(또는 ID)을 입력해주세요."
             return False, "소스 폴더 URL(또는 ID)을 입력해주세요."
         if not dest_input:
             return False, "목적지 경로를 입력해주세요."
@@ -248,15 +280,20 @@ class RcloneG2gCopyProvider(BaseMetadataProvider):
                 transfers=config.get("RCLONE_TRANSFERS"),
                 checkers=config.get("RCLONE_CHECKERS"),
                 fast_list=str(config.get("RCLONE_FAST_LIST", "true")).lower() != "false",
+                source_kind=source_kind,
             )
         except ConfigError as e:
             return False, str(e)
         except (ValueError, RuntimeError) as e:
             return False, str(e)
 
+        kind_label = "파일" if source_kind == "file" else "폴더"
         if dest_folder_name != dest_input:
-            return True, f"복사를 시작했습니다. (입력하신 마운트 경로를 rclone 기준 경로 \"{dest_folder_name}\"로 변환했습니다)"
-        return True, "복사를 시작했습니다. 진행 상황은 화면 하단 로그에서 확인하세요."
+            return True, (
+                f"{kind_label} 복사를 시작했습니다. "
+                f"(입력하신 마운트 경로를 rclone 기준 경로 \"{dest_folder_name}\"로 변환했습니다)"
+            )
+        return True, f"{kind_label} 복사를 시작했습니다. 진행 상황은 화면 하단 로그에서 확인하세요."
 
     # ------------------------------------------------------------------
     # 풀페이지 뷰(index.html/script.js)가 주기적으로 폴링하는 데이터 소스

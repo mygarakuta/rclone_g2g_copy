@@ -6,6 +6,18 @@
 `scan_scheduler.py`/`script.js` 실제 소스를 참고해, 커스텀 Flask Blueprint 없이
 **BaseMetadataProvider 표준 계약(search/apply/get_dashboard_data)만으로** 동작합니다.
 
+> **v2.32.0 변경 사항**:
+> 1. **개별 압축파일(zip/cbz 등) 1개 단위 복사 지원**. 카테고리탭에 "소스 종류"
+>    라디오(📁 폴더 전체 / 📦 개별 압축파일)가 추가됐고, 개별 파일을 고르면
+>    `rclone copyid`로 파일 하나만 ID 기반으로 복사합니다 (자세한 내용은
+>    아래 "개별 압축파일 1개만 복사하기" 절 참고).
+> 2. 갱신된 `guide_plugins.md`의 권고에 따라 `admin_only = True`를 추가했습니다.
+>    이 플러그인은 서버에서 `subprocess`로 rclone을 직접 실행하므로, 일반
+>    계정에게는 사이드바 탭/데이터 자체가 완전히 숨겨집니다 (실행 자체는
+>    `apply-metadata` 라우트가 이미 관리자 전용이라 기존에도 일반 계정은
+>    실행할 수 없었지만, 탭 노출 여부는 권한 매트릭스 설정에 따라 달랐던
+>    부분이 이제 fail-closed로 통일됩니다).
+
 > **v2.31.0 변경 사항**: Google Apps Script(GAS) 백엔드를 완전히 제거했습니다
 > (`gas_logic.py`, `gas/Code.gs` 삭제, 카테고리탭의 방식 선택 체크박스 삭제).
 > 이제 rclone 단일 백엔드로만 동작합니다. 또한 설정 조회 헬퍼를
@@ -17,8 +29,53 @@
 - **설정(모달, settings.html)**: `RCLONE_PATH` / `CONFIG_PATH` / `RCLONE_REMOTE` /
   `MOUNT_PREFIX`(선택) / `DISCORD_WEBHOOK_URL`(선택) / `RCLONE_TRANSFERS` /
   `RCLONE_CHECKERS` / `RCLONE_FAST_LIST` — `config_schema`에 선언된 필드와 1:1 대응.
-- **카테고리탭(사이드바 전체 화면, index.html)**: 소스 폴더(URL/ID), 목적지 경로,
-  [복사 시작]/[중단] 버튼, 진행률 바, 실시간 로그.
+- **카테고리탭(사이드바 전체 화면, index.html)**: 소스 종류(폴더/개별 파일)
+  라디오, 소스(URL/ID), 목적지 경로, [복사 시작]/[중단] 버튼, 진행률 바,
+  실시간 로그.
+- 이 플러그인은 `admin_only = True`라 **관리자 계정에만** 사이드바에 노출됩니다.
+
+## 개별 압축파일 1개만 복사하기 (v2.32.0)
+
+기존에는 소스를 항상 "폴더"로만 취급했습니다 - 구글 드라이브 폴더 공유
+링크(`.../drive/folders/ID`)를 넣으면 `rclone copy`가 `remote,root_folder_id=ID:`
+트릭(remote의 루트를 그 폴더로 가장하는 방식)으로 폴더 안의 내용 전체를
+서버사이드 복사했습니다. 이 트릭은 **폴더 전용**이라 개별 파일 하나만 복사할
+때는 쓸 수 없었습니다.
+
+이제 카테고리탭 상단에 **"소스 종류"** 라디오 버튼이 생겼습니다:
+
+- **📁 폴더 전체** (기본값, 기존 동작 그대로): 구글 드라이브 폴더 공유 링크
+  또는 폴더 ID 입력 → `rclone copy remote,root_folder_id=<폴더ID>: remote:목적지경로`
+- **📦 개별 압축파일**: 구글 드라이브 **파일** 공유 링크(`.../file/d/ID/view`,
+  `.../open?id=ID` 등) 또는 파일 ID 입력 → `rclone copyid remote: <파일ID>
+  remote:목적지경로/` (rclone의 ID 기반 단일 파일 복사 명령). 목적지 경로 끝에
+  항상 `/`를 붙여서 호출하므로, rclone이 원본 파일명을 그대로 써서 그 폴더
+  아래에 저장합니다 - "목적지 경로"는 두 모드 모두 항상 **폴더** 경로를
+  뜻합니다(개별 파일 모드에서도 파일명을 따로 입력할 필요 없음).
+
+동작 방식:
+
+- 소스 입력창에 URL을 붙여넣으면 `script.js`가 URL 패턴(`/folders/` vs
+  `/file/d/` 또는 `?id=`)을 보고 라디오를 **자동으로 맞춰줍니다** (슬래시 없는
+  순수 ID만 붙여넣은 경우는 폴더/파일 여부를 URL만으로 판단할 수 없어 자동
+  전환하지 않으므로, 이 경우는 라디오를 직접 선택해주세요).
+- 라벨/플레이스홀더/안내 문구가 선택한 소스 종류에 맞춰 바뀝니다.
+- `apply(action="start_copy")` 호출 시 `item_data.source_kind`(`"folder"` 또는
+  `"file"`)로 서버에 전달되며, 생략되면 하위 호환을 위해 `"folder"`로
+  동작합니다 (예전 프론트/외부 연동이 이 필드 없이 호출해도 기존과 동일하게
+  작동).
+- `logic.py`가 `source_kind`에 따라 `get_folder_id()`/`get_file_id()` 중
+  맞는 쪽으로 ID를 추출하고, `_run_job()`이 `rclone copy` 대신 `rclone
+  copyid`를 실행합니다. 진행률 파싱(`_parse_progress_line()`)과 로그/취소/
+  강제초기화/디스코드 알림 로직은 두 모드가 완전히 동일하게 공유합니다
+  (`--progress` 출력 형식이 같으므로 별도 분기 불필요).
+- 새로고침 시 입력창뿐 아니라 **소스 종류 라디오도** `job_state.json`에 저장된
+  `source_kind`를 읽어 그대로 복원됩니다.
+- 복사가 진행 중일 때는 소스 종류 라디오가 잠깁니다(이미 시작된 job에는
+  중간에 종류를 바꿔도 반영되지 않으므로 혼동 방지).
+- `RCLONE_TRANSFERS`/`RCLONE_CHECKERS`/`RCLONE_FAST_LIST`(동시성 옵션)는 파일이
+  여러 개 있는 폴더 복사에서만 의미가 있으므로, 개별 파일 복사(`copyid`)에는
+  적용되지 않습니다(파일 1개라 동시성 자체가 무의미).
 
 ## 디자인이 plugin_board(플러그인게시판)와 한 세트로 보이는 이유
 
@@ -318,8 +375,9 @@ rclone_g2g_copy/
 ```
 ./plugins/data/rclone_g2g_copy/
   job_state.json   # {job_id, status, pid, cancel_requested, returncode,
-                    #  started_at, finished_at, source_id, dest_path, progress,
-                    #  source_url_input, dest_input, cancel_requested}
+                    #  started_at, finished_at, source_id, source_kind,
+                    #  dest_path, progress, source_url_input, dest_input,
+                    #  cancel_requested}
   job.log           # rclone --progress 출력 (한 줄씩)
 ```
 

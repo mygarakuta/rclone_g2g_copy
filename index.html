@@ -12,6 +12,20 @@
   </div>
 
   <div class="rgc-card">
+    <div class="rgc-field rgc-source-kind-field">
+      <span class="rgc-field-legend">소스 종류</span>
+      <div class="rgc-radio-group" data-role="source-kind-group" role="radiogroup" aria-label="소스 종류">
+        <label class="rgc-radio">
+          <input type="radio" name="rgc-source-kind" value="folder" data-role="source-kind-folder" checked />
+          <span>📁 폴더 전체</span>
+        </label>
+        <label class="rgc-radio">
+          <input type="radio" name="rgc-source-kind" value="file" data-role="source-kind-file" />
+          <span>📦 개별 압축파일 (zip/cbz 등 1개)</span>
+        </label>
+      </div>
+    </div>
+
     <div class="rgc-field">
       <label for="rgc-source-url" data-role="source-label">소스 폴더 (구글 드라이브 URL 또는 폴더 ID)</label>
       <input
@@ -21,6 +35,7 @@
         placeholder="https://drive.google.com/drive/folders/xxxxxxxxxxxx"
         autocomplete="off"
       />
+      <p class="rgc-field-hint" data-role="source-kind-hint"></p>
     </div>
 
     <div class="rgc-field">

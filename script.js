@@ -15,6 +15,10 @@
   let lastJobStatus = null; // running | success | error | cancelled | null(아직 없음)
 
   const banner = container.querySelector('[data-role="config-banner"]');
+  const sourceKindFolderRadio = container.querySelector('[data-role="source-kind-folder"]');
+  const sourceKindFileRadio = container.querySelector('[data-role="source-kind-file"]');
+  const sourceLabel = container.querySelector('[data-role="source-label"]');
+  const sourceKindHint = container.querySelector('[data-role="source-kind-hint"]');
   const sourceInput = container.querySelector('[data-role="source-url"]');
   const destInput = container.querySelector('[data-role="dest-folder"]');
   const destPreview = container.querySelector('[data-role="dest-preview"]');
@@ -84,6 +88,62 @@
 
   destInput.addEventListener('input', updateDestPreview);
 
+  // ==================================================================
+  // 소스 종류(폴더 전체 / 개별 압축파일 1개) 토글
+  // logic.py의 get_folder_id()/get_file_id()와 동일한 URL 패턴을 JS로도
+  // 복제해서, 사용자가 URL을 붙여넣으면 라디오를 자동으로 맞춰준다
+  // (수동으로 직접 바꿀 수도 있음 - 최종 판단은 항상 서버가 다시 검증).
+  // ==================================================================
+  const SOURCE_KIND_LABEL = {
+    folder: {
+      label: '소스 폴더 (구글 드라이브 URL 또는 폴더 ID)',
+      placeholder: 'https://drive.google.com/drive/folders/xxxxxxxxxxxx',
+      hint: '폴더 공유 링크(.../drive/folders/폴더ID) 또는 폴더 ID를 입력하세요. 폴더 안의 파일 전체가 복사됩니다.',
+    },
+    file: {
+      label: '소스 파일 (구글 드라이브 URL 또는 파일 ID) — 압축파일 1개',
+      placeholder: 'https://drive.google.com/file/d/xxxxxxxxxxxx/view',
+      hint: '파일 공유 링크(.../file/d/파일ID/view) 또는 파일 ID를 입력하세요. 원본 파일명 그대로 목적지 폴더에 저장됩니다.',
+    },
+  };
+
+  function getSourceKind() {
+    return sourceKindFileRadio && sourceKindFileRadio.checked ? 'file' : 'folder';
+  }
+
+  function setSourceKind(kind) {
+    const normalized = kind === 'file' ? 'file' : 'folder';
+    if (sourceKindFolderRadio) sourceKindFolderRadio.checked = normalized === 'folder';
+    if (sourceKindFileRadio) sourceKindFileRadio.checked = normalized === 'file';
+    updateSourceKindUI();
+  }
+
+  function updateSourceKindUI() {
+    const meta = SOURCE_KIND_LABEL[getSourceKind()];
+    if (sourceLabel) sourceLabel.textContent = meta.label;
+    sourceInput.placeholder = meta.placeholder;
+    if (sourceKindHint) sourceKindHint.textContent = meta.hint;
+  }
+
+  // URL 패턴으로 폴더/파일을 자동 감지해 라디오를 맞춰준다 (편의 기능 -
+  // 사용자가 직접 라디오를 눌러 덮어쓸 수도 있음).
+  function autoDetectSourceKindFromUrl() {
+    const url = (sourceInput.value || '').trim();
+    if (!url) return;
+    if (/\/folders\//.test(url)) {
+      setSourceKind('folder');
+    } else if (/\/file\/d\//.test(url) || /[?&]id=/.test(url)) {
+      setSourceKind('file');
+    }
+    // 슬래시 없는 순수 ID만 붙여넣은 경우는 폴더/파일 어느 쪽인지 URL만으로
+    // 알 수 없으므로 자동 변경하지 않는다 - 사용자가 라디오로 직접 선택.
+  }
+
+  if (sourceKindFolderRadio) sourceKindFolderRadio.addEventListener('change', updateSourceKindUI);
+  if (sourceKindFileRadio) sourceKindFileRadio.addEventListener('change', updateSourceKindUI);
+  sourceInput.addEventListener('input', autoDetectSourceKindFromUrl);
+  updateSourceKindUI(); // 초기 라벨/플레이스홀더 세팅
+
   function renderConfigBanner(cfg) {
     if (!cfg) return;
     mountPrefix = cfg.mount_prefix || '';
@@ -150,6 +210,10 @@
     // "중단"이 눌러도 안 먹히거나 실제로는 안 도는데 running으로 남아있는
     // 꼬인 상황을 위한 탈출구 - 실행 중일 때 같이 보여준다.
     resetBtn.hidden = !isRunning;
+    // 실행 중에는 소스 종류를 바꿔도 이미 시작된 job에는 반영되지 않으므로
+    // 혼동을 막기 위해 라디오를 잠근다.
+    if (sourceKindFolderRadio) sourceKindFolderRadio.disabled = isRunning;
+    if (sourceKindFileRadio) sourceKindFileRadio.disabled = isRunning;
   }
 
   function formatProgressDetail(progress) {
@@ -212,6 +276,9 @@
     // 딱 한 번만 채우고, 이후에는 사용자가 직접 수정한 값을 건드리지 않는다.
     if (!inputsPrefilled) {
       inputsPrefilled = true;
+      if (job.source_kind) {
+        setSourceKind(job.source_kind);
+      }
       if (job.source_url_input && !sourceInput.value) {
         sourceInput.value = job.source_url_input;
       }
@@ -220,7 +287,8 @@
       }
       updateDestPreview();
     }
-    logDest.textContent = job.dest_path ? `→ ${job.dest_path}` : '';
+    const kindPrefix = job.source_kind === 'file' ? '[파일] ' : job.source_kind === 'folder' ? '[폴더] ' : '';
+    logDest.textContent = job.dest_path ? `${kindPrefix}→ ${job.dest_path}` : '';
     appendLines(job.lines);
     renderProgress(job); // 진행률은 상태가 바뀌지 않아도(계속 'running') 매 폴링마다 갱신되어야 함
 
@@ -304,11 +372,13 @@
   }
 
   function startCopy() {
+    const sourceKind = getSourceKind();
     const sourceUrl = (sourceInput.value || '').trim();
     const destFolder = (destInput.value || '').trim();
 
     if (!sourceUrl) {
-      statusText.textContent = '소스 폴더 URL(또는 ID)을 입력해주세요.';
+      statusText.textContent =
+        sourceKind === 'file' ? '소스 파일 URL(또는 ID)을 입력해주세요.' : '소스 폴더 URL(또는 ID)을 입력해주세요.';
       return;
     }
     if (!destFolder) {
@@ -332,6 +402,7 @@
       action: 'start_copy',
       source_url: sourceUrl,
       dest_folder_name: destFolder,
+      source_kind: sourceKind,
     })
       .then((data) => {
         if (!data || !data.success) {

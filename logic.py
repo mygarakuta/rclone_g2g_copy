@@ -127,6 +127,27 @@ def get_folder_id(drive_url):
     raise ValueError("유효한 구글 드라이브 폴더 주소가 아닙니다.")
 
 
+def get_file_id(drive_url):
+    """구글 드라이브 개별 파일(zip/cbz 등 압축파일 1개) URL에서 파일 ID를 추출합니다.
+
+    지원 패턴:
+      - https://drive.google.com/file/d/<ID>/view?usp=sharing
+      - https://drive.google.com/open?id=<ID>
+      - https://drive.google.com/uc?id=<ID>&export=download
+      - 슬래시가 없는 순수 파일 ID 문자열을 그대로 입력한 경우
+    """
+    drive_url = (drive_url or "").strip()
+    match = re.search(r"/file/d/([a-zA-Z0-9_-]+)", drive_url)
+    if match:
+        return match.group(1)
+    match = re.search(r"[?&]id=([a-zA-Z0-9_-]+)", drive_url)
+    if match:
+        return match.group(1)
+    if drive_url and "/" not in drive_url:
+        return drive_url
+    raise ValueError("유효한 구글 드라이브 파일 주소가 아닙니다.")
+
+
 def list_rclone_remotes(config_path):
     """rclone.conf 파일을 파싱해 등록된 remote 이름 목록을 반환한다.
 
@@ -345,43 +366,74 @@ def _maybe_explain_config_save_error(line):
 
 
 def _run_job(job_id, rclone_path, config_path, rclone_remote, source_id, dest_folder_name,
-             discord_webhook_url=None, transfers=8, checkers=16, fast_list=True):
+             discord_webhook_url=None, transfers=8, checkers=16, fast_list=True, source_kind="folder"):
     global _CONFIG_SAVE_HINT_SHOWN
     _CONFIG_SAVE_HINT_SHOWN = False  # 새 job마다 힌트를 다시 보여줄 수 있게 초기화
 
-    source_path = f"{rclone_remote},root_folder_id={source_id}:"
+    source_kind = (source_kind or "folder").strip().lower()
+    if source_kind not in ("folder", "file"):
+        source_kind = "folder"
+
+    # dest_folder_name은 start_copy_job()에서 이미 kind에 맞게 정규화되어
+    # 들어온다 (file 모드는 끝에 '/'가 보장됨 - 아래 start_copy_job 참고).
     dest_path = f"{rclone_remote}:{dest_folder_name}"
 
-    # 기본값(rclone: --transfers=4, --checkers=8)만으로는 구글 드라이브
-    # 서버사이드 복사(파일마다 독립적인 API 호출) 성능이 잘 안 나오는 경우가
-    # 많다. 동시 처리 개수를 늘리면 API 라운드트립 지연을 훨씬 잘 가려준다
-    # (단, 너무 높이면 구글 API 레이트리밋(403)에 걸려 오히려 재시도로
-    # 느려질 수 있으니 설정에서 조절 가능하게 함).
-    cmd = [
-        rclone_path,
-        "copy",
-        source_path,
-        dest_path,
-        "--config",
-        config_path,
-        "--progress",
-        "--transfers",
-        str(transfers),
-        "--checkers",
-        str(checkers),
-    ]
-    if fast_list:
-        # 폴더/파일 개수가 많을 때 목록 조회 API 호출 수를 크게 줄여준다
-        # (메모리를 좀 더 쓰는 대신 훨씬 빠르게 전체 목록을 가져옴).
-        cmd.append("--fast-list")
+    if source_kind == "file":
+        # 개별 파일(압축파일 1개)은 root_folder_id 트릭이 통하지 않는다 -
+        # 그 트릭은 remote의 루트를 특정 "폴더"로 가장하는 방식이라 폴더
+        # 전용이다. 대신 rclone의 ID 기반 단일 파일 복사 명령(copyid)을 쓴다.
+        # 구문: `rclone copyid remote: ID 목적지경로`
+        #   - 목적지 경로가 '/'로 끝나면 원본 파일명을 그대로 사용해서 그
+        #     디렉터리 아래에 저장한다 (여기서는 항상 이 형태로 호출됨).
+        cmd = [
+            rclone_path,
+            "copyid",
+            f"{rclone_remote}:",
+            source_id,
+            dest_path,
+            "--config",
+            config_path,
+            "--progress",
+        ]
+        source_line = f"[*] 소스 파일 ID      : {source_id}"
+        mode_line = "[*] 복사 방식         : 개별 파일 (rclone copyid)"
+    else:
+        source_path = f"{rclone_remote},root_folder_id={source_id}:"
+
+        # 기본값(rclone: --transfers=4, --checkers=8)만으로는 구글 드라이브
+        # 서버사이드 복사(파일마다 독립적인 API 호출) 성능이 잘 안 나오는 경우가
+        # 많다. 동시 처리 개수를 늘리면 API 라운드트립 지연을 훨씬 잘 가려준다
+        # (단, 너무 높이면 구글 API 레이트리밋(403)에 걸려 오히려 재시도로
+        # 느려질 수 있으니 설정에서 조절 가능하게 함).
+        cmd = [
+            rclone_path,
+            "copy",
+            source_path,
+            dest_path,
+            "--config",
+            config_path,
+            "--progress",
+            "--transfers",
+            str(transfers),
+            "--checkers",
+            str(checkers),
+        ]
+        if fast_list:
+            # 폴더/파일 개수가 많을 때 목록 조회 API 호출 수를 크게 줄여준다
+            # (메모리를 좀 더 쓰는 대신 훨씬 빠르게 전체 목록을 가져옴).
+            cmd.append("--fast-list")
+        source_line = f"[*] 소스 폴더 ID      : {source_id}"
+        mode_line = (
+            f"[*] 동시성            : --transfers={transfers} --checkers={checkers}"
+            + (" --fast-list" if fast_list else "")
+        )
 
     _append_log_line("=" * 60)
     _append_log_line(f"[*] Rclone 경로       : {rclone_path}")
     _append_log_line(f"[*] Config 파일 경로  : {config_path}")
-    _append_log_line(f"[*] 소스 폴더 ID      : {source_id}")
+    _append_log_line(source_line)
     _append_log_line(f"[*] 목적지 경로       : {dest_path}")
-    _append_log_line(f"[*] 동시성            : --transfers={transfers} --checkers={checkers}"
-                      + (" --fast-list" if fast_list else ""))
+    _append_log_line(mode_line)
     _append_log_line("=" * 60)
     _append_log_line("[*] 서버사이드 복사를 시작합니다...\n")
 
@@ -447,10 +499,19 @@ def _run_job(job_id, rclone_path, config_path, rclone_remote, source_id, dest_fo
 
 def start_copy_job(rclone_path, config_path, rclone_remote, source_folder_url, dest_folder_name,
                     source_url_input=None, dest_input=None, discord_webhook_url=None,
-                    transfers=8, checkers=16, fast_list=True):
+                    transfers=8, checkers=16, fast_list=True, source_kind="folder"):
     """
-    유효성 검사 후 백그라운드 스레드로 rclone copy를 시작합니다.
+    유효성 검사 후 백그라운드 스레드로 rclone copy(또는 copyid)를 시작합니다.
     이미 실행 중인(그리고 실제로 살아있는) job이 있으면 거부합니다.
+
+    source_kind: "folder"(기본, 폴더 전체를 rclone copy로 복사) 또는
+    "file"(개별 압축파일 1개를 rclone copyid로 복사). 이 값에 따라 URL/ID
+    추출 규칙과 실제 rclone 명령이 달라진다 (자세한 것은 _run_job 참고).
+    file 모드에서는 목적지 경로 끝에 '/'를 보장해, rclone이 원본 파일명을
+    그대로 써서 그 디렉터리 아래에 저장하도록 만든다 (경로 끝에 슬래시가
+    없으면 rclone copyid는 그 문자열 자체를 새 파일명으로 해석하므로, 사용자가
+    입력한 "목적지 폴더 경로"라는 화면 문구와 어긋나지 않도록 여기서 슬래시를
+    항상 붙인다).
 
     source_url_input / dest_input: 변환 전, 사용자가 화면에 실제로 타이핑한 원본
     값(소스는 URL 그대로, 목적지는 마운트 경로일 수도 있는 원본). 새로고침 시
@@ -459,14 +520,18 @@ def start_copy_job(rclone_path, config_path, rclone_remote, source_folder_url, d
     discord_webhook_url: 설정된 경우, 복사가 끝났을 때(성공/실패/중단 모두)
     디스코드로 알림을 보낸다. 비어있으면 알림을 보내지 않는다.
 
-    transfers / checkers / fast_list: rclone 동시성 옵션. 서버사이드 복사는
-    파일마다 독립적인 API 호출이라, 기본값(4/8)보다 늘리면 훨씬 빨라지는
-    경우가 많다. 설정 화면에서 조절 가능.
+    transfers / checkers / fast_list: rclone 동시성 옵션(폴더 모드에서만 사용).
+    서버사이드 복사는 파일마다 독립적인 API 호출이라, 기본값(4/8)보다 늘리면
+    훨씬 빨라지는 경우가 많다. 설정 화면에서 조절 가능.
     """
     rclone_path = (rclone_path or "").strip()
     config_path = (config_path or "").strip()
     rclone_remote = (rclone_remote or "").strip()
     dest_folder_name = (dest_folder_name or "").strip()
+
+    source_kind = (source_kind or "folder").strip().lower()
+    if source_kind not in ("folder", "file"):
+        source_kind = "folder"
 
     try:
         transfers = max(1, int(transfers))
@@ -483,7 +548,14 @@ def start_copy_job(rclone_path, config_path, rclone_remote, source_folder_url, d
         raise ValueError("목적지 폴더 경로를 입력해주세요.")
 
     _validate_config(rclone_path, config_path)
-    source_id = get_folder_id(source_folder_url)
+    if source_kind == "file":
+        source_id = get_file_id(source_folder_url)
+        # copyid는 목적지 경로 끝의 '/' 유무로 "디렉터리 안에 원본 파일명대로
+        # 저장" 여부를 판단하므로, 항상 슬래시를 보장해 원본 파일명을 유지한다.
+        dest_folder_name_for_job = dest_folder_name.rstrip("/") + "/"
+    else:
+        source_id = get_folder_id(source_folder_url)
+        dest_folder_name_for_job = dest_folder_name
 
     existing = _read_state()
     if existing and existing.get("status") == "running" and _process_is_alive(existing.get("pid")):
@@ -500,7 +572,8 @@ def start_copy_job(rclone_path, config_path, rclone_remote, source_folder_url, d
         "started_at": time.time(),
         "finished_at": None,
         "source_id": source_id,
-        "dest_path": f"{rclone_remote}:{dest_folder_name}",
+        "source_kind": source_kind,
+        "dest_path": f"{rclone_remote}:{dest_folder_name_for_job}",
         # 새로고침 시 입력창 복원용 원본 값
         "source_url_input": (source_url_input or source_folder_url or "").strip(),
         "dest_input": (dest_input or dest_folder_name or "").strip(),
@@ -509,8 +582,8 @@ def start_copy_job(rclone_path, config_path, rclone_remote, source_folder_url, d
 
     thread = threading.Thread(
         target=_run_job,
-        args=(job_id, rclone_path, config_path, rclone_remote, source_id, dest_folder_name,
-              discord_webhook_url, transfers, checkers, fast_list),
+        args=(job_id, rclone_path, config_path, rclone_remote, source_id, dest_folder_name_for_job,
+              discord_webhook_url, transfers, checkers, fast_list, source_kind),
         daemon=True,
     )
     thread.start()
