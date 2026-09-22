@@ -72,15 +72,19 @@
   }
 
   // ==================================================================
-  // 소스 종류(폴더 전체 / 개별 압축파일 그대로 복사 / 다운로드 + 압축 해제) 토글
+  // 소스 종류(폴더 전체 복사 / 개별 압축파일 1개 그대로 복사 / 폴더 안
+  // 압축파일 일괄 다운로드+압축해제) 토글
   // logic.py의 get_folder_id()/get_file_id()와 동일한 URL 패턴을 JS로도
   // 복제해서, 사용자가 URL을 붙여넣으면 라디오를 자동으로 맞춰준다
   // (수동으로 직접 바꿀 수도 있음 - 최종 판단은 항상 서버가 다시 검증).
   //
-  // "file_extract" 모드는 다른 두 모드와 "목적지 경로"의 의미 자체가 다르다 -
-  // folder/file은 rclone 원격 경로("remote:path")이고, file_extract는 서버의
+  // "folder_extract" 모드는 다른 두 모드와 "목적지 경로"의 의미 자체가 다르다 -
+  // folder/file은 rclone 원격 경로("remote:path")이고, folder_extract는 서버의
   // 로컬 절대경로다(마운트 경로 변환을 적용하면 안 됨). 그래서 destPreview도
   // 이 모드에서는 rclone 변환 미리보기 대신 안내 문구로 바뀐다.
+  //
+  // folder/folder_extract는 둘 다 소스가 "폴더"라는 점에서 같은 부류다 -
+  // isFolderKind()로 이 둘을 묶어서 자동 감지 로직에 쓴다.
   // ==================================================================
   const SOURCE_KIND_META = {
     folder: {
@@ -101,19 +105,23 @@
       startLabel: '복사 시작',
       showRcloneDestPreview: true,
     },
-    file_extract: {
-      sourceLabel: '소스 파일 (구글 드라이브 URL 또는 파일 ID) — 압축파일 1개',
-      sourcePlaceholder: 'https://drive.google.com/file/d/xxxxxxxxxxxx/view',
-      sourceHint: '파일 공유 링크(.../file/d/파일ID/view) 또는 파일 ID를 입력하세요. 서버로 다운로드한 뒤 압축을 해제합니다 (zip/cbz만 지원).',
+    folder_extract: {
+      sourceLabel: '소스 폴더 (구글 드라이브 URL 또는 폴더 ID) — 폴더 안의 압축파일 전체',
+      sourcePlaceholder: 'https://drive.google.com/drive/folders/xxxxxxxxxxxx',
+      sourceHint: '폴더 공유 링크(.../drive/folders/폴더ID) 또는 폴더 ID를 입력하세요. 폴더 안(하위 폴더 포함)의 zip/cbz 파일을 모두 찾아 각각 다운로드 후 압축을 해제합니다.',
       destLabel: '압축 해제 목적지 (서버의 로컬 절대경로 — rclone 경로가 아닙니다)',
-      destPlaceholder: '/data/comics/시리즈명/화명',
-      startLabel: '다운로드 + 압축 해제 시작',
+      destPlaceholder: '/data/comics/시리즈명',
+      startLabel: '전체 다운로드 + 압축 해제 시작',
       showRcloneDestPreview: false,
     },
   };
 
+  function isFolderKind(kind) {
+    return kind === 'folder' || kind === 'folder_extract';
+  }
+
   function getSourceKind() {
-    if (sourceKindExtractRadio && sourceKindExtractRadio.checked) return 'file_extract';
+    if (sourceKindExtractRadio && sourceKindExtractRadio.checked) return 'folder_extract';
     if (sourceKindFileRadio && sourceKindFileRadio.checked) return 'file';
     return 'folder';
   }
@@ -122,7 +130,7 @@
     const normalized = SOURCE_KIND_META[kind] ? kind : 'folder';
     if (sourceKindFolderRadio) sourceKindFolderRadio.checked = normalized === 'folder';
     if (sourceKindFileRadio) sourceKindFileRadio.checked = normalized === 'file';
-    if (sourceKindExtractRadio) sourceKindExtractRadio.checked = normalized === 'file_extract';
+    if (sourceKindExtractRadio) sourceKindExtractRadio.checked = normalized === 'folder_extract';
     updateSourceKindUI();
   }
 
@@ -142,9 +150,9 @@
     const raw = (destInput.value || '').trim();
 
     if (!meta.showRcloneDestPreview) {
-      // file_extract 모드: rclone 경로 변환이 아니라, "이 로컬 폴더 아래에
-      // 압축이 풀린다"는 사실을 안내한다.
-      destPreview.textContent = raw ? `이 서버 로컬 경로 아래에 압축이 해제됩니다: ${raw}` : '';
+      // folder_extract 모드: rclone 경로 변환이 아니라, "이 로컬 폴더 아래에
+      // 원본 폴더 구조 그대로 압축이 풀린다"는 사실을 안내한다.
+      destPreview.textContent = raw ? `이 서버 로컬 경로 아래에 원본 폴더 구조대로 압축이 해제됩니다: ${raw}` : '';
       destPreview.removeAttribute('data-state');
       return;
     }
@@ -167,20 +175,25 @@
   destInput.addEventListener('input', updateDestPreview);
 
   // URL 패턴으로 폴더/파일을 자동 감지해 라디오를 맞춰준다 (편의 기능 -
-  // 사용자가 직접 라디오를 눌러 덮어쓸 수도 있음). file_extract는 사용자가
-  // 명시적으로 선택해야 하는 모드라, 파일 URL을 붙여넣었다고 자동으로
-  // file_extract로 바뀌지는 않는다 - 이미 file/file_extract 중 하나가 선택돼
-  // 있으면 그대로 둔다(사용자의 명시적 선택을 존중).
+  // 사용자가 직접 라디오를 눌러 덮어쓸 수도 있음).
+  //
+  // folder/folder_extract는 둘 다 "폴더" URL을 받으므로, 폴더 URL을
+  // 붙여넣었을 때 이미 folder_extract가 선택되어 있다면 그대로 둔다(사용자의
+  // 명시적 선택을 folder로 되돌리지 않음) - 파일 계열('file')이 선택되어
+  // 있을 때만 기본값인 'folder'로 전환한다. 파일 URL을 붙여넣었을 때는
+  // 반대로 폴더 계열이 선택되어 있으면 'file'로 전환한다.
   function autoDetectSourceKindFromUrl() {
     const url = (sourceInput.value || '').trim();
     if (!url) return;
+    const current = getSourceKind();
     if (/\/folders\//.test(url)) {
-      setSourceKind('folder');
-    } else if (/\/file\/d\//.test(url) || /[?&]id=/.test(url)) {
-      if (getSourceKind() === 'folder') {
-        setSourceKind('file'); // 파일 URL인데 아직 '폴더'가 선택돼 있으면 기본값인 '개별 파일'로 전환
+      if (!isFolderKind(current)) {
+        setSourceKind('folder');
       }
-      // 이미 file 또는 file_extract가 선택되어 있으면 그대로 유지한다.
+    } else if (/\/file\/d\//.test(url) || /[?&]id=/.test(url)) {
+      if (isFolderKind(current)) {
+        setSourceKind('file');
+      }
     }
     // 슬래시 없는 순수 ID만 붙여넣은 경우는 폴더/파일 어느 쪽인지 URL만으로
     // 알 수 없으므로 자동 변경하지 않는다 - 사용자가 라디오로 직접 선택.
@@ -267,6 +280,7 @@
 
   function formatProgressDetail(progress) {
     const parts = [];
+    if (progress.current_file) parts.push(progress.current_file);
     if (progress.transferred && progress.total) parts.push(`${progress.transferred} / ${progress.total}`);
     if (progress.speed) parts.push(progress.speed);
     if (progress.eta) parts.push(`ETA ${progress.eta}`);
@@ -337,7 +351,7 @@
       updateDestPreview();
     }
     const kindPrefix =
-      job.source_kind === 'file_extract' ? '[압축해제] ' : job.source_kind === 'file' ? '[파일] ' : job.source_kind === 'folder' ? '[폴더] ' : '';
+      job.source_kind === 'folder_extract' ? '[일괄압축해제] ' : job.source_kind === 'file' ? '[파일] ' : job.source_kind === 'folder' ? '[폴더] ' : '';
     logDest.textContent = job.dest_path ? `${kindPrefix}→ ${job.dest_path}` : '';
     appendLines(job.lines);
     renderProgress(job); // 진행률은 상태가 바뀌지 않아도(계속 'running') 매 폴링마다 갱신되어야 함
@@ -428,12 +442,12 @@
 
     if (!sourceUrl) {
       statusText.textContent =
-        sourceKind === 'folder' ? '소스 폴더 URL(또는 ID)을 입력해주세요.' : '소스 파일 URL(또는 ID)을 입력해주세요.';
+        sourceKind === 'file' ? '소스 파일 URL(또는 ID)을 입력해주세요.' : '소스 폴더 URL(또는 ID)을 입력해주세요.';
       return;
     }
     if (!destFolder) {
       statusText.textContent =
-        sourceKind === 'file_extract' ? '압축 해제 목적지(로컬 절대경로)를 입력해주세요.' : '목적지 경로를 입력해주세요.';
+        sourceKind === 'folder_extract' ? '압축 해제 목적지(로컬 절대경로)를 입력해주세요.' : '목적지 경로를 입력해주세요.';
       return;
     }
 
