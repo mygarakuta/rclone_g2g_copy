@@ -6,10 +6,18 @@
 `scan_scheduler.py`/`script.js` 실제 소스를 참고해, 커스텀 Flask Blueprint 없이
 **BaseMetadataProvider 표준 계약(search/apply/get_dashboard_data)만으로** 동작합니다.
 
+> **v2.32.1 변경 사항 (핫픽스)**: v2.32.0에서 추가한 개별 파일 복사가 실제로는
+> 동작하지 않는 버그를 수정했습니다. `rclone copyid ...`로 호출했는데
+> 실사용 환경에서 `Error: unknown command "copyid" for "rclone"`로 실패하는
+> 것을 확인했습니다 — `copyid`는 독립 명령이 아니라 **Google Drive 백엔드
+> 전용 "backend 명령"**이라, 반드시 `rclone backend copyid drive: ID path`
+> 형태로 호출해야 했습니다. 이제 올바른 형태로 고쳤습니다. (내부적으로
+> 표준 `operations.Copy()`를 그대로 쓰므로 진행률 파싱은 그대로 동작합니다.)
+
 > **v2.32.0 변경 사항**:
 > 1. **개별 압축파일(zip/cbz 등) 1개 단위 복사 지원**. 카테고리탭에 "소스 종류"
 >    라디오(📁 폴더 전체 / 📦 개별 압축파일)가 추가됐고, 개별 파일을 고르면
->    `rclone copyid`로 파일 하나만 ID 기반으로 복사합니다 (자세한 내용은
+>    `rclone backend copyid`로 파일 하나만 ID 기반으로 복사합니다 (자세한 내용은
 >    아래 "개별 압축파일 1개만 복사하기" 절 참고).
 > 2. 갱신된 `guide_plugins.md`의 권고에 따라 `admin_only = True`를 추가했습니다.
 >    이 플러그인은 서버에서 `subprocess`로 rclone을 직접 실행하므로, 일반
@@ -47,11 +55,13 @@
 - **📁 폴더 전체** (기본값, 기존 동작 그대로): 구글 드라이브 폴더 공유 링크
   또는 폴더 ID 입력 → `rclone copy remote,root_folder_id=<폴더ID>: remote:목적지경로`
 - **📦 개별 압축파일**: 구글 드라이브 **파일** 공유 링크(`.../file/d/ID/view`,
-  `.../open?id=ID` 등) 또는 파일 ID 입력 → `rclone copyid remote: <파일ID>
-  remote:목적지경로/` (rclone의 ID 기반 단일 파일 복사 명령). 목적지 경로 끝에
-  항상 `/`를 붙여서 호출하므로, rclone이 원본 파일명을 그대로 써서 그 폴더
-  아래에 저장합니다 - "목적지 경로"는 두 모드 모두 항상 **폴더** 경로를
-  뜻합니다(개별 파일 모드에서도 파일명을 따로 입력할 필요 없음).
+  `.../open?id=ID` 등) 또는 파일 ID 입력 → `rclone backend copyid drive: <파일ID>
+  remote:목적지경로/` (rclone Google Drive 백엔드 전용 ID 기반 단일 파일 복사
+  명령 — 독립 명령이 아니라 `backend` 서브커맨드로 호출해야 한다는 점에
+  주의). 목적지 경로 끝에 항상 `/`를 붙여서 호출하므로, rclone이 원본
+  파일명을 그대로 써서 그 폴더 아래에 저장합니다 - "목적지 경로"는 두 모드
+  모두 항상 **폴더** 경로를 뜻합니다(개별 파일 모드에서도 파일명을 따로
+  입력할 필요 없음).
 
 동작 방식:
 
@@ -66,16 +76,17 @@
   작동).
 - `logic.py`가 `source_kind`에 따라 `get_folder_id()`/`get_file_id()` 중
   맞는 쪽으로 ID를 추출하고, `_run_job()`이 `rclone copy` 대신 `rclone
-  copyid`를 실행합니다. 진행률 파싱(`_parse_progress_line()`)과 로그/취소/
-  강제초기화/디스코드 알림 로직은 두 모드가 완전히 동일하게 공유합니다
-  (`--progress` 출력 형식이 같으므로 별도 분기 불필요).
+  backend copyid`를 실행합니다. 진행률 파싱(`_parse_progress_line()`)과 로그/
+  취소/강제초기화/디스코드 알림 로직은 두 모드가 완전히 동일하게 공유합니다
+  (`backend copyid`도 내부적으로 표준 전송 엔진을 그대로 쓰므로 `--progress`
+  출력 형식이 같아 별도 분기 불필요).
 - 새로고침 시 입력창뿐 아니라 **소스 종류 라디오도** `job_state.json`에 저장된
   `source_kind`를 읽어 그대로 복원됩니다.
 - 복사가 진행 중일 때는 소스 종류 라디오가 잠깁니다(이미 시작된 job에는
   중간에 종류를 바꿔도 반영되지 않으므로 혼동 방지).
 - `RCLONE_TRANSFERS`/`RCLONE_CHECKERS`/`RCLONE_FAST_LIST`(동시성 옵션)는 파일이
-  여러 개 있는 폴더 복사에서만 의미가 있으므로, 개별 파일 복사(`copyid`)에는
-  적용되지 않습니다(파일 1개라 동시성 자체가 무의미).
+  여러 개 있는 폴더 복사에서만 의미가 있으므로, 개별 파일 복사(`backend
+  copyid`)에는 적용되지 않습니다(파일 1개라 동시성 자체가 무의미).
 
 ## 디자인이 plugin_board(플러그인게시판)와 한 세트로 보이는 이유
 

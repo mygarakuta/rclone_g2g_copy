@@ -381,12 +381,20 @@ def _run_job(job_id, rclone_path, config_path, rclone_remote, source_id, dest_fo
     if source_kind == "file":
         # 개별 파일(압축파일 1개)은 root_folder_id 트릭이 통하지 않는다 -
         # 그 트릭은 remote의 루트를 특정 "폴더"로 가장하는 방식이라 폴더
-        # 전용이다. 대신 rclone의 ID 기반 단일 파일 복사 명령(copyid)을 쓴다.
-        # 구문: `rclone copyid remote: ID 목적지경로`
-        #   - 목적지 경로가 '/'로 끝나면 원본 파일명을 그대로 사용해서 그
-        #     디렉터리 아래에 저장한다 (여기서는 항상 이 형태로 호출됨).
+        # 전용이다. 대신 rclone의 ID 기반 단일 파일 복사 기능을 쓴다.
+        #
+        # !! 중요 !! `rclone copyid ...`는 실제 rclone에 존재하지 않는 명령이다
+        # (v2.32.0에서 이렇게 구현했다가 "unknown command copyid for rclone"
+        # 오류로 실패하는 것을 실사용 중 확인함). copyid는 독립 명령이 아니라
+        # Google Drive 백엔드 전용 "backend 명령"이며, 반드시
+        # `rclone backend copyid drive: ID path` 형태로 호출해야 한다
+        # (rclone/rclone 커밋 e5190f14 "drive: implement 'rclone backend
+        # copyid' command", rclone 공식 포럼 확인 완료). 내부적으로는
+        # operations.Copy()를 그대로 쓰므로 --progress 통계 라인은 폴더
+        # 모드와 동일하게 찍힌다.
         cmd = [
             rclone_path,
+            "backend",
             "copyid",
             f"{rclone_remote}:",
             source_id,
@@ -396,7 +404,7 @@ def _run_job(job_id, rclone_path, config_path, rclone_remote, source_id, dest_fo
             "--progress",
         ]
         source_line = f"[*] 소스 파일 ID      : {source_id}"
-        mode_line = "[*] 복사 방식         : 개별 파일 (rclone copyid)"
+        mode_line = "[*] 복사 방식         : 개별 파일 (rclone backend copyid)"
     else:
         source_path = f"{rclone_remote},root_folder_id={source_id}:"
 
@@ -501,15 +509,15 @@ def start_copy_job(rclone_path, config_path, rclone_remote, source_folder_url, d
                     source_url_input=None, dest_input=None, discord_webhook_url=None,
                     transfers=8, checkers=16, fast_list=True, source_kind="folder"):
     """
-    유효성 검사 후 백그라운드 스레드로 rclone copy(또는 copyid)를 시작합니다.
+    유효성 검사 후 백그라운드 스레드로 rclone copy(또는 backend copyid)를 시작합니다.
     이미 실행 중인(그리고 실제로 살아있는) job이 있으면 거부합니다.
 
     source_kind: "folder"(기본, 폴더 전체를 rclone copy로 복사) 또는
-    "file"(개별 압축파일 1개를 rclone copyid로 복사). 이 값에 따라 URL/ID
-    추출 규칙과 실제 rclone 명령이 달라진다 (자세한 것은 _run_job 참고).
+    "file"(개별 압축파일 1개를 `rclone backend copyid`로 복사). 이 값에 따라
+    URL/ID 추출 규칙과 실제 rclone 명령이 달라진다 (자세한 것은 _run_job 참고).
     file 모드에서는 목적지 경로 끝에 '/'를 보장해, rclone이 원본 파일명을
     그대로 써서 그 디렉터리 아래에 저장하도록 만든다 (경로 끝에 슬래시가
-    없으면 rclone copyid는 그 문자열 자체를 새 파일명으로 해석하므로, 사용자가
+    없으면 copyid는 그 문자열 자체를 새 파일명으로 해석하므로, 사용자가
     입력한 "목적지 폴더 경로"라는 화면 문구와 어긋나지 않도록 여기서 슬래시를
     항상 붙인다).
 

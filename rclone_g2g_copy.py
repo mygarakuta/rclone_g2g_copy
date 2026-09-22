@@ -27,7 +27,19 @@ guide_plugins.md 2장 "서브프로세스 실행 차단(기본값)" 규칙에 �
 .env에 ALLOW_PLUGIN_SUBPROCESS=true를 설정하지 않으면 이 플러그인은 로드 자체가
 거부됩니다. (→ 이 배포 환경에서는 이미 설정 완료됨)
 
-변경 이력(이번 수정, v2.32.0):
+변경 이력(이번 수정, v2.32.1 — 핫픽스):
+- **v2.32.0에서 추가한 개별 파일 복사가 실제로는 동작하지 않는 버그를
+  수정했습니다.** `rclone copyid ...`로 호출했는데, 실사용 환경에서
+  `Error: unknown command "copyid" for "rclone"`로 실패하는 것을 확인함 -
+  `copyid`는 독립 명령이 아니라 Google Drive 백엔드 전용 "backend 명령"이라,
+  반드시 `rclone backend copyid drive: ID path` 형태로 호출해야 했습니다
+  (rclone/rclone 커밋 e5190f14 "drive: implement 'rclone backend copyid'
+  command" 및 rclone 공식 포럼 확인). cmd를
+  `[rclone_path, "backend", "copyid", f"{remote}:", id, dest, ...]`로
+  수정했습니다. `backend copyid`도 내부적으로 표준 `operations.Copy()`를
+  그대로 쓰므로, `--progress` 진행률 파싱 로직은 수정 없이 그대로 재사용됩니다.
+
+변경 이력(v2.32.0):
 - 갱신된 guide_plugins.md 반영: subprocess 실행 플러그인 권장 사항에 따라
   admin_only=True를 추가했습니다 (일반 계정에게는 사이드바 탭/데이터 자체가
   완전히 숨겨집니다 - 실행 자체는 apply-metadata 라우트가 이미 admin 전용이라
@@ -38,7 +50,7 @@ guide_plugins.md 2장 "서브프로세스 실행 차단(기본값)" 규칙에 �
   logic.py가 그에 맞춰 다른 rclone 명령을 사용합니다:
     - 폴더: 기존과 동일하게 root_folder_id 트릭 + `rclone copy`
     - 개별 파일: 그 트릭이 통하지 않으므로(폴더 전용 트릭) rclone의 ID 기반
-      단일 파일 복사 명령 `rclone copyid remote: <파일ID> <목적지경로>/`를
+      단일 파일 복사 명령 `rclone backend copyid drive: <파일ID> <목적지경로>/`를
       사용합니다(목적지 경로 끝에 '/'를 보장해 원본 파일명을 그대로 유지).
   자세한 것은 logic.py의 get_file_id() / _run_job() 주석 참고.
 
