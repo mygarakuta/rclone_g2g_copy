@@ -27,7 +27,25 @@ guide_plugins.md 2장 "서브프로세스 실행 차단(기본값)" 규칙에 �
 .env에 ALLOW_PLUGIN_SUBPROCESS=true를 설정하지 않으면 이 플러그인은 로드 자체가
 거부됩니다. (→ 이 배포 환경에서는 이미 설정 완료됨)
 
-변경 이력(이번 수정, v2.37.0):
+변경 이력(이번 수정, v2.38.0):
+- **목적지 경로가 누가 봐도 Windows 로컬 경로(`K:\다운로드`, `\\서버\공유` 등)면,
+  "폴더 전체"/"개별 압축파일"(원격) 모드를 선택한 채로 두어도 자동으로
+  "폴더 전체 로컬로 다운로드"/"개별 파일 로컬로 다운로드" 모드로 전환되도록
+  했습니다.** "5개 모드를 매번 직접 골라야 하냐, Windows인지 자동으로
+  판별할 수 있는 것 아니냐"는 질문에 대한 답입니다 - 결론은 "부분적으로
+  가능"입니다: Windows 드라이브 문자/UNC 경로는 rclone 원격 상대경로
+  관례에 절대 나오지 않는 형태라 100% 확신할 수 있어 자동 전환이
+  안전하지만, POSIX 절대경로(`/data/...`)는 rclone 원격 상대경로 관례도
+  똑같이 `/`로 시작해서 문자열만으로는 "로컬 디스크"인지 "원격 안의 그
+  경로"인지 구분이 안 되므로 그 경우는 자동 전환하지 않고 사용자가 고른
+  모드를 그대로 존중합니다(잘못 추측해서 반대로 처리하면 더 헷갈리는
+  사고가 나기 때문). `logic.looks_like_windows_local_path()`에 판별
+  로직을 두고, 서버(`_start_copy()`)와 화면(`script.js`) 양쪽에서 동일한
+  규칙을 적용합니다 - 화면에서 입력하는 즉시 라디오가 바뀌고, 혹시
+  그 전환 없이 요청이 오더라도(예: 구버전 캐시, 외부 연동) 서버가 한 번
+  더 같은 판정을 해서 잘못된 조합으로 실행되는 것을 막습니다.
+
+변경 이력(v2.37.0):
 - **"폴더 전체를 압축 해제 없이 서버 로컬로 그대로 다운로드"하는
   "folder_local" 모드를 추가했습니다.** 사용자가 세 가지 시나리오로 요구
   사항을 정리해 확인을 요청했습니다: ① 폴더 → 목적지 폴더 하부에 폴더
@@ -174,6 +192,7 @@ from .logic import (
     to_rclone_relative_path,
     resolve_mount_prefix,
     list_rclone_remotes,
+    looks_like_windows_local_path,
 )
 
 
@@ -369,6 +388,23 @@ class RcloneG2gCopyProvider(BaseMetadataProvider):
         if source_kind not in ("folder", "folder_local", "file", "file_local", "folder_extract"):
             source_kind = "folder"
 
+        # 안전장치: "folder"/"file"(원격) 모드인데 목적지가 누가 봐도 Windows
+        # 로컬 경로(K:\... 또는 \\서버\...)면, 사용자가 소스 종류를 잘못
+        # 고른 것이 거의 확실하다 - rclone이 그 경로를 원격 경로 문자열로
+        # 오인해서 엉뚱하게 동작하는(예: "libgdrive_oauth:K:다운로드/")
+        # 사고가 실제로 있었기 때문에, 매번 사용자가 직접 라디오를 바꾸게
+        # 시키는 대신 여기서 자동으로 로컬 모드로 승격시킨다. 이 판별은
+        # POSIX 절대경로('/data/...')에는 적용하지 않는다 - rclone 원격
+        # 상대경로도 흔히 '/'로 시작해서 문자열만으로는 구분이 안 되므로,
+        # 확실한 신호(드라이브 문자/UNC)가 있을 때만 자동 전환한다.
+        auto_switched_to_local = False
+        if source_kind == "folder" and looks_like_windows_local_path(dest_input):
+            source_kind = "folder_local"
+            auto_switched_to_local = True
+        elif source_kind == "file" and looks_like_windows_local_path(dest_input):
+            source_kind = "file_local"
+            auto_switched_to_local = True
+
         is_file_source = source_kind in ("file", "file_local")  # 폴더가 아니라 파일 1개가 소스인 모드들
         is_local_dest = source_kind in ("folder_local", "file_local", "folder_extract")  # 목적지가 rclone 원격이 아니라 서버 로컬인 모드들
 
@@ -424,10 +460,15 @@ class RcloneG2gCopyProvider(BaseMetadataProvider):
             "file_local": "로컬 다운로드",
             "folder_extract": "일괄 압축 해제",
         }[source_kind]
+        auto_switch_note = (
+            " (목적지가 Windows 로컬 경로로 보여 자동으로 로컬 다운로드 모드로 전환했습니다.)"
+            if auto_switched_to_local
+            else ""
+        )
         if source_kind == "folder_extract":
             return True, "폴더 안 압축파일 목록을 조회하고 있습니다. 진행 상황은 화면 하단 로그에서 확인하세요."
         if source_kind in ("file_local", "folder_local"):
-            return True, "로컬로 다운로드를 시작했습니다. 진행 상황은 화면 하단 로그에서 확인하세요."
+            return True, f"로컬로 다운로드를 시작했습니다.{auto_switch_note} 진행 상황은 화면 하단 로그에서 확인하세요."
         if dest_folder_name != dest_input:
             return True, (
                 f"{kind_label} 복사를 시작했습니다. "

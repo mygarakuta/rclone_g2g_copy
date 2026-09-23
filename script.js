@@ -203,7 +203,40 @@
     }
   }
 
-  destInput.addEventListener('input', updateDestPreview);
+  // logic.py의 looks_like_windows_local_path()와 동일한 판별 - Windows
+  // 드라이브 문자('K:\', 'K:/') 또는 UNC 경로('\\서버\...')는 rclone 원격
+  // 상대경로 관례로 절대 안 나오므로, 이 형태면 "로컬 경로를 쓰려는 의도"로
+  // 확신할 수 있다. POSIX 절대경로('/data/...')는 원격 상대경로 관례와
+  // 형태가 같아 판별 대상에서 제외한다(서버 쪽 _start_copy()도 동일).
+  function looksLikeWindowsLocalPath(path) {
+    if (!path) return false;
+    if (/^[A-Za-z]:[\\/]/.test(path)) return true;
+    if (path.startsWith('\\\\')) return true;
+    return false;
+  }
+
+  // 목적지 입력창에 누가 봐도 Windows 로컬 경로를 입력했는데 아직 "폴더
+  // 전체"/"개별 압축파일"(원격) 모드가 선택돼 있으면, 자동으로 로컬 모드로
+  // 전환해준다 - 서버(_start_copy())도 동일한 안전장치를 갖고 있지만,
+  // 시작 버튼을 누르기 전에 화면에서 먼저 바로잡아주는 편이 자연스럽다.
+  // 반대 방향(로컬 -> 원격)으로는 자동 전환하지 않는다 - POSIX 절대경로는
+  // 로컬/원격 어느 쪽 의도인지 문자열만으로 확신할 수 없으므로, 이미 로컬
+  // 모드가 선택된 상태를 함부로 원격으로 되돌리면 안 된다.
+  function autoSwitchToLocalIfDestLooksWindowsPath() {
+    const dest = (destInput.value || '').trim();
+    if (!looksLikeWindowsLocalPath(dest)) return;
+    const current = getSourceKind();
+    if (current === 'folder') {
+      setSourceKind('folder_local');
+    } else if (current === 'file') {
+      setSourceKind('file_local');
+    }
+  }
+
+  destInput.addEventListener('input', () => {
+    updateDestPreview();
+    autoSwitchToLocalIfDestLooksWindowsPath();
+  });
 
   // URL 패턴으로 폴더/파일을 자동 감지해 라디오를 맞춰준다 (편의 기능 -
   // 사용자가 직접 라디오를 눌러 덮어쓸 수도 있음).
