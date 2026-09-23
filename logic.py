@@ -29,7 +29,36 @@ OS가 보장하는 값인 PID를 파일에 저장해두고 os.kill(pid, SIGTERM)
 직접 종료합니다 - 요청을 처리하는 모듈 인스턴스가 job을 시작했던 그
 인스턴스와 달라도 항상 동작합니다.
 
-변경 이력(이번 수정): "다운로드 후 압축 해제(folder_extract)" 모드를 추가했습니다.
+변경 이력(이번 수정, v2.35.0 — Windows 크래시 핫픽스): **rclone_g2g_copy가 실행
+중이면 몇 초 안에 BookOasis 전체가 강제 종료되는 심각한 버그를 고쳤습니다**
+(Windows에서 실행할 때만 발생). 원인: `_process_is_alive()`가 프로세스 생존
+확인에 POSIX 관용구 `os.kill(pid, 0)`을 썼는데, Windows API에서는 시그널
+번호 0이 `CTRL_C_EVENT`와 정확히 같은 값이라 이 호출이 실제로는 "그 콘솔에
+붙어있는 모든 프로세스에 Ctrl+C 이벤트를 전파"하는 동작(`GenerateConsoleCtrlEvent`)
+으로 해석됩니다. rclone 하위 프로세스를 별도 프로세스 그룹 없이 띄우고
+있었기 때문에 BookOasis 자신의 콘솔 프로세스까지 그 이벤트를 그대로 받아
+종료됩니다. 이 함수는 job이 "실행 중"인 동안 프론트엔드가 몇 초마다
+폴링할 때마다(`get_last_job_status()` 경유) 호출되므로, 폴더/파일/폴더 일괄
+압축해제 중 어떤 모드든 job을 시작하기만 하면 다음 폴링에서 거의 확정적으로
+재현됐습니다. 수정 내용:
+- `_process_is_alive()`를 Windows에서는 `ctypes`로 `OpenProcess`+
+  `GetExitCodeProcess`를 직접 호출해 생존 여부만 안전하게 확인하도록
+  분기했습니다(POSIX는 기존 `os.kill(pid, 0)` 그대로 유지).
+- `signal.SIGKILL`은 Windows의 `signal` 모듈에 아예 없는 속성이라(참조 시
+  `AttributeError`) 강제 종료 폴백 시 `getattr(signal, "SIGKILL",
+  signal.SIGTERM)`으로 안전하게 대체했습니다.
+- 방어적으로, 모든 rclone `subprocess.Popen`/`subprocess.run` 호출에
+  Windows에서는 `creationflags=subprocess.CREATE_NEW_PROCESS_GROUP`,
+  POSIX에서는 `start_new_session=True`를 적용해 하위 프로세스를 부모
+  콘솔/프로세스 그룹과 분리했습니다 - 앞으로 비슷한 종류의 신호 관련
+  문제가 생겨도 BookOasis 본체까지 전파되지 않도록 하는 안전장치입니다.
+- `folder_extract` 모드의 목적지 절대경로 검증을 POSIX 전용이던
+  `dest_folder_name.startswith("/")`에서 `os.path.isabs(dest_folder_name)`로
+  바꿔, Windows 드라이브 경로(`K:\다운로드`, `K:/다운로드` 등)도 정상적으로
+  절대경로로 인식하도록 했습니다(이전에는 Windows 경로가 전부
+  ValueError로 거부됐습니다).
+
+변경 이력(v2.34.0): "다운로드 후 압축 해제(folder_extract)" 모드를 추가했습니다.
 개별 파일을 rclone backend copyid로 서버 로컬 스테이징 폴더에 내려받은 뒤,
 파이썬 표준 라이브러리 zipfile로 최종 목적지(로컬 절대경로)에 압축을 풉니다
 (zip/cbz만 지원 - rar 등은 미지원). 압축 해제는 rclone이 할 수 있는 일이
@@ -43,6 +72,7 @@ import re
 import shutil
 import signal
 import subprocess
+import ctypes
 import threading
 import time
 import urllib.request
@@ -302,9 +332,49 @@ def _read_log_lines():
     return lines
 
 
+def _normalize_local_abs_path(path):
+    """압축 해제 목적지(서버 로컬 절대경로)의 끝 구분자를 정리한다.
+
+    POSIX('/')와 Windows('\\') 구분자를 모두 다루되, 드라이브 루트(예:
+    'K:\\', '/')만 남는 경우는 그 자체를 절대경로로 유지해야 하므로
+    구분자를 완전히 떼어내지 않는다 - 'K:\\'에서 그냥 rstrip하면 'K:'가
+    남는데, os.path.isabs('K:')는 Windows에서도 False(드라이브 상대경로로
+    취급)라 이후 처리가 깨진다.
+    """
+    stripped = path.rstrip("/\\")
+    if not stripped:
+        return path  # 루트 자체('/', 'C:\\' 등) - 원본 유지
+    if os.name == "nt" and re.fullmatch(r"[A-Za-z]:", stripped):
+        return stripped + "\\"
+    return stripped
+
+
 def _process_is_alive(pid):
     if not pid:
         return False
+    if os.name == "nt":
+        # !! 매우 중요 !! Windows에서는 os.kill(pid, 0)을 쓰면 안 된다.
+        # POSIX에서 시그널 0은 "프로세스 존재 확인용" 관용구로 안전하지만,
+        # Windows API에서는 그 값(0)이 CTRL_C_EVENT와 정확히 같아서
+        # os.kill(pid, 0)이 실제로는 GenerateConsoleCtrlEvent(CTRL_C_EVENT, pid)를
+        # 호출해버린다 - 이는 pid가 속한 콘솔에 연결된 "모든" 프로세스에
+        # Ctrl+C를 전파한다. rclone 하위 프로세스가 부모(BookOasis)와 같은
+        # 콘솔을 공유하고 있었기 때문에, 이 한 줄 때문에 BookOasis 프로세스
+        # 자체가 몇 초 만에 강제 종료되는 심각한 버그가 있었다(v2.35.0에서
+        # 발견/수정). 대신 OpenProcess + GetExitCodeProcess로 순수하게
+        # 조회만 하는 방식을 쓴다 - 아무 신호도 보내지 않는다.
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+        if not handle:
+            return False  # 이미 종료되었거나(대부분) 접근 권한이 없는 pid
+        try:
+            exit_code = ctypes.c_ulong(0)
+            ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+            return bool(ok) and exit_code.value == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
     except (ProcessLookupError, PermissionError, TypeError):
@@ -312,6 +382,22 @@ def _process_is_alive(pid):
     except OSError:
         return False
     return True
+
+
+# Windows의 signal 모듈에는 SIGKILL이 아예 없다(AttributeError). SIGTERM은
+# os.kill()을 통해 Windows에서도 TerminateProcess로 이어지므로(강제 종료 효과가
+# 이미 있음) 이걸로 안전하게 대체한다.
+_HARD_KILL_SIGNAL = getattr(signal, "SIGKILL", signal.SIGTERM)
+
+
+# rclone 하위 프로세스를 부모(BookOasis)의 콘솔/프로세스 그룹과 분리해서
+# 띄우기 위한 공용 Popen/run 인자. 위 _process_is_alive() 버그처럼 앞으로
+# 비슷한 신호 관련 문제가 또 생기더라도 BookOasis 본체까지 전파되지 않도록
+# 막아주는 방어적 조치다(POSIX: 새 세션, Windows: 새 프로세스 그룹).
+if os.name == "nt":
+    _SUBPROCESS_ISOLATION_KWARGS = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+else:
+    _SUBPROCESS_ISOLATION_KWARGS = {"start_new_session": True}
 
 
 def _notify_discord(webhook_url, content):
@@ -473,7 +559,10 @@ def _list_archive_files_in_folder(rclone_path, config_path, rclone_remote, folde
     source = f"{rclone_remote},root_folder_id={folder_id}:"
     cmd = [rclone_path, "lsjson", source, "--recursive", "--config", config_path]
     try:
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+        result = subprocess.run(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120,
+            **_SUBPROCESS_ISOLATION_KWARGS,
+        )
     except Exception as e:  # noqa: BLE001
         return None, f"폴더 목록 조회 실패: {e}"
 
@@ -595,7 +684,10 @@ def _run_folder_extract_job(job_id, rclone_path, config_path, rclone_remote, fol
         returncode = None
         file_progress = {}
         try:
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            process = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                **_SUBPROCESS_ISOLATION_KWARGS,
+            )
             _update_state(pid=process.pid)
 
             for raw_line in process.stdout:
@@ -811,7 +903,10 @@ def _run_job(job_id, rclone_path, config_path, rclone_remote, source_id, dest_fo
     progress = {}  # 파일개수 줄과 바이트 줄이 서로 다른 순간에 나오므로 누적해서 합친다
 
     try:
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        process = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                **_SUBPROCESS_ISOLATION_KWARGS,
+            )
         _update_state(pid=process.pid)
 
         for raw_line in process.stdout:
@@ -938,9 +1033,16 @@ def start_copy_job(rclone_path, config_path, rclone_remote, source_folder_url, d
         # 이 모드는 rclone 원격 경로가 아니라 "서버 로컬 절대경로"를 받는다 -
         # 압축을 풀어놓을 실제 디스크 위치이기 때문. 상대경로/마운트 경로가
         # 섞여 들어오면 엉뚱한 곳에 풀릴 수 있으므로 절대경로만 허용한다.
-        if not dest_folder_name.startswith("/"):
-            raise ValueError("압축 해제 목적지는 서버의 로컬 절대경로여야 합니다 (예: /data/comics/시리즈명).")
-        dest_folder_name_for_job = dest_folder_name.rstrip("/") or "/"
+        # os.path.isabs()는 실행 중인 OS 기준으로 판단하므로, POSIX 서버에서는
+        # '/data/...'가, Windows 서버에서는 'K:\\다운로드'나 'K:/다운로드'가
+        # 각각 절대경로로 정상 인식된다(예전엔 '/'로 시작하는지만 검사해서
+        # Windows 드라이브 경로가 전부 거부됐었음 - v2.35.0에서 수정).
+        if not os.path.isabs(dest_folder_name):
+            raise ValueError(
+                "압축 해제 목적지는 서버의 로컬 절대경로여야 합니다 "
+                "(예: POSIX는 /data/comics/시리즈명, Windows는 K:\\다운로드\\시리즈명)."
+            )
+        dest_folder_name_for_job = _normalize_local_abs_path(dest_folder_name)
         dest_path_display = dest_folder_name_for_job
     else:
         source_id = get_folder_id(source_folder_url)
@@ -1002,7 +1104,10 @@ def cancel_current_job():
 
     try:
         os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
+    except (ProcessLookupError, OSError):
+        # 이미 종료된 프로세스이거나(Windows에서는 OpenProcess 실패가
+        # ProcessLookupError가 아니라 일반 OSError로 올 수 있음) 그 사이
+        # 이미 사라진 경우 - 무해하므로 무시한다.
         pass
     except Exception as e:
         return False, f"중단 요청 중 오류: {e}"
@@ -1011,7 +1116,7 @@ def cancel_current_job():
         time.sleep(5)
         if _process_is_alive(pid):
             try:
-                os.kill(pid, signal.SIGKILL)
+                os.kill(pid, _HARD_KILL_SIGNAL)
             except Exception:
                 pass
 

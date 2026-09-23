@@ -110,7 +110,7 @@
       sourcePlaceholder: 'https://drive.google.com/drive/folders/xxxxxxxxxxxx',
       sourceHint: '폴더 공유 링크(.../drive/folders/폴더ID) 또는 폴더 ID를 입력하세요. 폴더 안(하위 폴더 포함)의 zip/cbz 파일을 모두 찾아 각각 다운로드 후 압축을 해제합니다.',
       destLabel: '압축 해제 목적지 (서버의 로컬 절대경로 — rclone 경로가 아닙니다)',
-      destPlaceholder: '/data/comics/시리즈명',
+      destPlaceholder: '/data/comics/시리즈명  (Windows 서버라면 K:\\다운로드\\시리즈명)',
       startLabel: '전체 다운로드 + 압축 해제 시작',
       showRcloneDestPreview: false,
     },

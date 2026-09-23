@@ -27,7 +27,28 @@ guide_plugins.md 2장 "서브프로세스 실행 차단(기본값)" 규칙에 �
 .env에 ALLOW_PLUGIN_SUBPROCESS=true를 설정하지 않으면 이 플러그인은 로드 자체가
 거부됩니다. (→ 이 배포 환경에서는 이미 설정 완료됨)
 
-변경 이력(이번 수정, v2.34.0):
+변경 이력(이번 수정, v2.35.0 — Windows 크래시 핫픽스):
+- **rclone_g2g_copy가 job을 실행하는 동안 BookOasis 전체가 몇 초 만에 강제
+  종료되는 심각한 버그를 수정했습니다 (Windows 배포에서만 발생).** 실사용
+  중이신 분이 "K 드라이브로 로컬 저장을 시도했더니 실패하면서 BookOasis가
+  꺼지는 것 같다"고 보고해주셔서 발견했습니다. 근본 원인은 `logic.py`의
+  `_process_is_alive()`가 프로세스 생존 확인에 썼던 `os.kill(pid, 0)` -
+  Windows API에서는 시그널 값 0이 `CTRL_C_EVENT`와 동일해서, 이 호출이
+  실제로는 그 콘솔에 연결된 모든 프로세스에 Ctrl+C를 전파해버립니다. 이
+  함수는 job이 "실행 중"인 동안 프론트엔드가 몇 초마다 폴링할 때마다
+  호출되므로, 어떤 소스 종류(폴더/파일/폴더 일괄 압축해제)로 시작하든
+  Windows에서는 시작 직후 재현됐습니다. `_process_is_alive()`를 Windows
+  전용 분기(ctypes OpenProcess/GetExitCodeProcess)로 바꾸고, 모든 rclone
+  하위 프로세스를 부모 콘솔/프로세스 그룹과 분리하도록(creationflags/
+  start_new_session) 방어적으로 고쳤습니다. `signal.SIGKILL`(Windows에
+  없는 속성) 참조도 안전한 대체값으로 바꿨습니다. 자세한 것은 logic.py
+  상단 주석과 `_process_is_alive()` 참고.
+- **"폴더 안 압축파일 일괄 압축 해제" 모드의 목적지 절대경로 검증이
+  Windows 경로(`K:\다운로드` 등)를 전부 거부하던 버그도 함께 수정했습니다.**
+  `dest_folder_name.startswith("/")`(POSIX 전용)를 `os.path.isabs(...)`로
+  바꿔, 실행 중인 OS에 맞게 올바르게 절대경로를 판정합니다.
+
+변경 이력(v2.34.0):
 - **"다운로드 후 압축 해제" 모드의 소스를 "개별 파일 1개"에서 "폴더 전체(일괄
   처리)"로 바꿨습니다.** source_kind 값도 `file_extract` → `folder_extract`로
   변경했습니다(폴더 모드와 마찬가지로 소스가 "폴더"라는 점을 이름에 반영).
