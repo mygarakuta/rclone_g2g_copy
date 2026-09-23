@@ -674,7 +674,11 @@ def _run_folder_extract_job(job_id, rclone_path, config_path, rclone_remote, fol
             _append_log_line(f"[-] 임시 폴더 생성 실패: {e}")
             continue
 
-        staging_dest = staging_dir.rstrip("/") + "/"
+        # copyid는 목적지 경로 끝에 구분자가 있어야 "그 디렉터리 안에 원본
+        # 파일명대로 저장"으로 해석한다. staging_dir은 로컬 파일시스템 경로라
+        # (원격 rclone 경로와 달리) OS에 맞는 구분자를 써야 한다 - Windows에서
+        # os.sep은 '\\'이므로 무조건 '/'를 붙이면 혼합 구분자가 되어버린다.
+        staging_dest = staging_dir if staging_dir.endswith(os.sep) else staging_dir + os.sep
         cmd = [
             rclone_path, "backend", "copyid",
             f"{rclone_remote}:", file_id, staging_dest,

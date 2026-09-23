@@ -6,6 +6,13 @@
 `scan_scheduler.py`/`script.js` 실제 소스를 참고해, 커스텀 Flask Blueprint 없이
 **BaseMetadataProvider 표준 계약(search/apply/get_dashboard_data)만으로** 동작합니다.
 
+> **v2.35.1 변경 사항**: "폴더 안 압축파일 일괄 압축 해제" 모드의 목적지
+> 필드 **라벨 자체**에 Windows 예시(`K:\다운로드\시리즈명`)를 항상 보이도록
+> 추가했습니다(이전엔 플레이스홀더에만 있어서 입력을 시작하면 사라졌습니다).
+> 또한 배치 다운로드가 쓰는 로컬 스테이징 경로에 구분자를 붙이는 로직이
+> Windows에서 역슬래시/슬래시가 섞인 경로를 만들던 것을 `os.sep` 기준으로
+> 고쳤습니다.
+
 > **v2.35.0 변경 사항 (Windows 크래시 핫픽스 — 중요)**: **rclone_g2g_copy가
 > job을 실행하는 동안 BookOasis 전체가 몇 초 만에 강제 종료되는 심각한
 > 버그를 수정했습니다 (Windows 배포에서만 발생).** 원인은 프로세스 생존
