@@ -14,26 +14,32 @@
   <div class="rgc-card">
     <div class="rgc-field rgc-source-kind-field">
       <span class="rgc-field-legend">소스 종류</span>
-      <div class="rgc-radio-group" data-role="source-kind-group" role="radiogroup" aria-label="소스 종류">
+      <div class="rgc-radio-group" data-role="source-shape-group" role="radiogroup" aria-label="소스 종류">
         <label class="rgc-radio">
-          <input type="radio" name="rgc-source-kind" value="folder" data-role="source-kind-folder" checked />
-          <span>📁 폴더 전체 (구글 드라이브 → 구글 드라이브)</span>
+          <input type="radio" name="rgc-source-shape" value="folder" data-role="source-shape-folder" checked />
+          <span>📁 폴더</span>
         </label>
         <label class="rgc-radio">
-          <input type="radio" name="rgc-source-kind" value="folder_local" data-role="source-kind-folder-local" />
-          <span>📁→💾 폴더 전체 로컬로 다운로드 (압축 해제 없음)</span>
+          <input type="radio" name="rgc-source-shape" value="file" data-role="source-shape-file" />
+          <span>📦 개별 파일</span>
+        </label>
+      </div>
+    </div>
+
+    <div class="rgc-field rgc-dest-kind-field">
+      <span class="rgc-field-legend">목적지 종류</span>
+      <div class="rgc-radio-group" data-role="dest-kind-group" role="radiogroup" aria-label="목적지 종류">
+        <label class="rgc-radio">
+          <input type="radio" name="rgc-dest-kind" value="remote" data-role="dest-kind-remote" checked />
+          <span>☁️ 구글 드라이브 (원격으로 복사)</span>
         </label>
         <label class="rgc-radio">
-          <input type="radio" name="rgc-source-kind" value="file" data-role="source-kind-file" />
-          <span>📦 개별 압축파일 (zip/cbz 등 1개, 구글 드라이브 → 구글 드라이브)</span>
+          <input type="radio" name="rgc-dest-kind" value="local" data-role="dest-kind-local" />
+          <span>💾 로컬 (그대로 다운로드)</span>
         </label>
         <label class="rgc-radio">
-          <input type="radio" name="rgc-source-kind" value="file_local" data-role="source-kind-file-local" />
-          <span>📦→💾 개별 파일 로컬로 다운로드 (압축 해제 없음)</span>
-        </label>
-        <label class="rgc-radio">
-          <input type="radio" name="rgc-source-kind" value="folder_extract" data-role="source-kind-extract" />
-          <span>📂→📦 폴더 안 압축파일 일괄 압축 해제</span>
+          <input type="radio" name="rgc-dest-kind" value="local_extract" data-role="dest-kind-local-extract" />
+          <span>📂 로컬 (압축 해제)</span>
         </label>
       </div>
     </div>

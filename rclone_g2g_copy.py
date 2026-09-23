@@ -27,7 +27,33 @@ guide_plugins.md 2장 "서브프로세스 실행 차단(기본값)" 규칙에 �
 .env에 ALLOW_PLUGIN_SUBPROCESS=true를 설정하지 않으면 이 플러그인은 로드 자체가
 거부됩니다. (→ 이 배포 환경에서는 이미 설정 완료됨)
 
-변경 이력(이번 수정, v2.38.0):
+변경 이력(이번 수정, v2.39.0 — 화면 구조 전면 개편):
+- **"소스 종류" 라디오 하나에 5가지 모드를 욱여넣던 구조를 버리고, "소스
+  종류"(폴더/개별 파일, 2개)와 "목적지 종류"(원격/로컬-그대로/로컬-압축해제,
+  3개)를 완전히 독립된 두 개의 라디오 그룹으로 분리했습니다.** 스크린샷으로
+  "이 둘은 원래 서로 다른 축 아니냐, 이렇게 나누는 게 맞지 않냐"는 지적을
+  받고 동의해서 반영했습니다. 기존에는 조합 하나하나를 전부 별도 라디오로
+  나열해서(폴더 전체/폴더 전체 로컬/개별 파일/개별 파일 로컬/일괄 압축해제)
+  선택지가 5개로 늘어났고, 두 축이 뒤섞여 화면도 복잡했습니다(신고해주신
+  스크린샷의 겹침 현상도 그 여파로 보입니다). 2×3 매트릭스로 분리하니
+  선택지는 여전히 5개 라디오(2+3)지만 훨씬 명확해졌고, **이전에는 만들 수
+  없었던 여섯 번째 조합 "개별 파일 → 로컬 압축 해제"(`file_extract`)도
+  자연스럽게 생겼습니다** - 폴더 스캔 없이 파일 하나만 다운로드+압축 해제할
+  때 씁니다(`_run_file_extract_job()`).
+  - 서버로 보내는 `source_kind` 값 자체(`folder`/`folder_local`/`file`/
+    `file_local`/`folder_extract`/`file_extract`)는 그대로라 기존
+    `job_state.json`이나 외부 연동과 호환됩니다 - 화면(script.js)이 두
+    라디오 그룹의 선택을 이 여섯 값 중 하나로 조합/분해(`COMBINED_KIND_MAP`
+    / `KIND_TO_SHAPE_AND_DEST`)할 뿐입니다.
+  - Windows 로컬 경로 자동 전환(v2.38.0)도 그대로 동작하며, 이제는 "목적지
+    종류" 라디오만 바꾸면 되므로 로직이 더 단순해졌습니다(소스 종류는
+    건드리지 않음).
+  - jsdom으로 실제 DOM에 script.js를 실행시켜, 두 라디오 그룹이 서로
+    독립적으로 동작하는지(한쪽을 바꿔도 다른 쪽이 유지되는지), 여섯 번째
+    조합(file_extract)에 실제로 도달 가능한지, Windows 자동 전환이 목적지
+    종류만 바꾸고 소스 종류는 안 건드리는지까지 전부 통합 테스트로 확인했습니다.
+
+변경 이력(v2.38.0):
 - **목적지 경로가 누가 봐도 Windows 로컬 경로(`K:\다운로드`, `\\서버\공유` 등)면,
   "폴더 전체"/"개별 압축파일"(원격) 모드를 선택한 채로 두어도 자동으로
   "폴더 전체 로컬로 다운로드"/"개별 파일 로컬로 다운로드" 모드로 전환되도록
@@ -380,23 +406,31 @@ class RcloneG2gCopyProvider(BaseMetadataProvider):
         # "file"(개별 압축파일 1개 그대로 원격에 복사) / "file_local"(개별
         # 파일 1개를 압축 해제 없이 서버 로컬에 그대로 다운로드) /
         # "folder_extract"(소스 폴더 안의 압축파일들을 각각 다운로드 후
-        # 로컬에 압축 해제 - 소스가 "폴더"라는 점에서 folder/folder_local과
-        # 같고, file/file_local과는 다름).
-        # index.html의 라디오 버튼에서 선택되어 넘어온다 - 생략되면 하위 호환을
-        # 위해 기존 동작(folder)을 그대로 유지한다.
+        # 로컬에 압축 해제) / "file_extract"(개별 파일 1개를 다운로드 후
+        # 로컬에 압축 해제 - folder_extract와 달리 폴더 스캔 없이 파일
+        # 하나만 처리).
+        # 화면(index.html)에서는 이 6가지를 "소스 종류"(폴더/파일)와
+        # "목적지 종류"(원격/로컬/로컬+압축해제) 두 개의 독립된 라디오
+        # 그룹으로 나눠 보여주고, script.js가 그 조합을 이 source_kind
+        # 문자열로 합쳐서 보낸다 - 생략되면 하위 호환을 위해 기존 동작
+        # (folder)을 그대로 유지한다.
         source_kind = str(item_data.get("source_kind", "folder")).strip().lower()
-        if source_kind not in ("folder", "folder_local", "file", "file_local", "folder_extract"):
+        valid_kinds = ("folder", "folder_local", "file", "file_local", "folder_extract", "file_extract")
+        if source_kind not in valid_kinds:
             source_kind = "folder"
 
         # 안전장치: "folder"/"file"(원격) 모드인데 목적지가 누가 봐도 Windows
-        # 로컬 경로(K:\... 또는 \\서버\...)면, 사용자가 소스 종류를 잘못
+        # 로컬 경로(K:\... 또는 \\서버\...)면, 사용자가 목적지 종류를 잘못
         # 고른 것이 거의 확실하다 - rclone이 그 경로를 원격 경로 문자열로
         # 오인해서 엉뚱하게 동작하는(예: "libgdrive_oauth:K:다운로드/")
         # 사고가 실제로 있었기 때문에, 매번 사용자가 직접 라디오를 바꾸게
-        # 시키는 대신 여기서 자동으로 로컬 모드로 승격시킨다. 이 판별은
-        # POSIX 절대경로('/data/...')에는 적용하지 않는다 - rclone 원격
-        # 상대경로도 흔히 '/'로 시작해서 문자열만으로는 구분이 안 되므로,
-        # 확실한 신호(드라이브 문자/UNC)가 있을 때만 자동 전환한다.
+        # 시키는 대신 여기서 자동으로 로컬(그대로 다운로드) 모드로
+        # 승격시킨다. 이 판별은 POSIX 절대경로('/data/...')에는 적용하지
+        # 않는다 - rclone 원격 상대경로도 흔히 '/'로 시작해서 문자열만으로는
+        # 구분이 안 되므로, 확실한 신호(드라이브 문자/UNC)가 있을 때만
+        # 자동 전환한다. (압축 해제까지는 자동으로 판단하지 않는다 - 그건
+        # "그대로 받을지, 풀어서 받을지"라는 별개의 선택이라 사용자가 직접
+        # 골라야 한다.)
         auto_switched_to_local = False
         if source_kind == "folder" and looks_like_windows_local_path(dest_input):
             source_kind = "folder_local"
@@ -405,8 +439,8 @@ class RcloneG2gCopyProvider(BaseMetadataProvider):
             source_kind = "file_local"
             auto_switched_to_local = True
 
-        is_file_source = source_kind in ("file", "file_local")  # 폴더가 아니라 파일 1개가 소스인 모드들
-        is_local_dest = source_kind in ("folder_local", "file_local", "folder_extract")  # 목적지가 rclone 원격이 아니라 서버 로컬인 모드들
+        is_file_source = source_kind in ("file", "file_local", "file_extract")  # 폴더가 아니라 파일 1개가 소스인 모드들
+        is_local_dest = source_kind in ("folder_local", "file_local", "folder_extract", "file_extract")  # 목적지가 rclone 원격이 아니라 서버 로컬인 모드들
 
         if not source_url:
             if is_file_source:
@@ -425,7 +459,7 @@ class RcloneG2gCopyProvider(BaseMetadataProvider):
             # 적용하지 않고 사용자가 입력한 값을 그대로 넘긴다. 절대경로
             # 검증(os.path.isabs)은 logic.start_copy_job()에서 한 번 더 한다.
             # ("file" 모드에 이런 로컬 경로를 잘못 넣으면 rclone이 그걸 원격
-            # 경로 문자열로 오인해 엉뚱하게 동작하므로, 반드시 소스 종류를
+            # 경로 문자열로 오인해 엉뚱하게 동작하므로, 반드시 목적지 종류를
             # 올바르게 골라야 한다 - 위 두 함수의 주석 참고.)
             dest_folder_name = dest_input
         else:
@@ -459,6 +493,7 @@ class RcloneG2gCopyProvider(BaseMetadataProvider):
             "file": "파일",
             "file_local": "로컬 다운로드",
             "folder_extract": "일괄 압축 해제",
+            "file_extract": "압축 해제",
         }[source_kind]
         auto_switch_note = (
             " (목적지가 Windows 로컬 경로로 보여 자동으로 로컬 다운로드 모드로 전환했습니다.)"
@@ -467,6 +502,8 @@ class RcloneG2gCopyProvider(BaseMetadataProvider):
         )
         if source_kind == "folder_extract":
             return True, "폴더 안 압축파일 목록을 조회하고 있습니다. 진행 상황은 화면 하단 로그에서 확인하세요."
+        if source_kind == "file_extract":
+            return True, "다운로드 및 압축 해제를 시작했습니다. 진행 상황은 화면 하단 로그에서 확인하세요."
         if source_kind in ("file_local", "folder_local"):
             return True, f"로컬로 다운로드를 시작했습니다.{auto_switch_note} 진행 상황은 화면 하단 로그에서 확인하세요."
         if dest_folder_name != dest_input:

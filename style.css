@@ -220,7 +220,8 @@
   cursor: not-allowed;
 }
 
-.rgc-source-kind-field {
+.rgc-source-kind-field,
+.rgc-dest-kind-field {
   margin-bottom: 16px;
 }
 

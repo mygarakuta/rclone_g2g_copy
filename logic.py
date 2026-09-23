@@ -575,6 +575,7 @@ def _kind_label(source_kind):
         "file": "파일 복사",
         "file_local": "로컬 다운로드",
         "folder_extract": "일괄 압축 해제",
+        "file_extract": "압축 해제",
     }.get(source_kind, "복사")
 
 
@@ -842,6 +843,119 @@ def _run_folder_extract_job(job_id, rclone_path, config_path, rclone_remote, fol
     _notify_discord(discord_webhook_url, notify_text)
 
 
+def _run_file_extract_job(job_id, rclone_path, config_path, rclone_remote, file_id, dest_dir,
+                           discord_webhook_url=None, keep_archive_after_extract=False):
+    """개별 압축파일 1개를 다운로드 후 압축 해제해서 dest_dir(로컬 절대경로)에
+    "직접" 풀어놓는다. folder_extract와 달리 소스가 폴더가 아니라 파일
+    하나라 별도 하위 폴더 구조를 만들지 않고, 사용자가 지정한 목적지 그
+    자체가 압축 해제 결과물이 놓일 위치다(사용자가 이미 "01권" 같은 이름의
+    폴더를 목적지로 지정했다고 가정).
+    """
+    global _CONFIG_SAVE_HINT_SHOWN
+    _CONFIG_SAVE_HINT_SHOWN = False
+
+    _append_log_line("=" * 60)
+    _append_log_line(f"[*] Rclone 경로       : {rclone_path}")
+    _append_log_line(f"[*] Config 파일 경로  : {config_path}")
+    _append_log_line(f"[*] 소스 파일 ID      : {file_id}")
+    _append_log_line(f"[*] 목적지 경로       : {dest_dir}")
+    _append_log_line("[*] 복사 방식         : 개별 파일 다운로드 후 압축 해제 (rclone backend copyid → zip 추출)")
+    _append_log_line("=" * 60)
+    _append_log_line("[*] 다운로드를 시작합니다...\n")
+
+    staging_dir = _staging_dir_for_job(job_id)
+    try:
+        os.makedirs(staging_dir, exist_ok=True)
+    except Exception as e:  # noqa: BLE001
+        _append_log_line(f"[-] 임시 다운로드 폴더 생성 실패: {e}")
+        _update_state(status="error", returncode=None, finished_at=time.time(), pid=None, progress={})
+        return
+
+    staging_dest = staging_dir if staging_dir.endswith(os.sep) else staging_dir + os.sep
+    cmd = [
+        rclone_path, "backend", "copyid",
+        f"{rclone_remote}:", file_id, staging_dest,
+        "--config", config_path, "--progress",
+    ]
+
+    returncode = None
+    progress = {}
+    try:
+        process = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            **_SUBPROCESS_ISOLATION_KWARGS,
+        )
+        _update_state(pid=process.pid)
+        for raw_line in process.stdout:
+            try:
+                decoded = raw_line.decode("utf-8", errors="replace")
+            except Exception:
+                decoded = raw_line.decode("latin-1", errors="ignore")
+            decoded = decoded.rstrip("\n")
+            for piece in decoded.split("\r"):
+                if piece:
+                    _append_log_line(piece)
+                    _maybe_explain_config_save_error(piece)
+                    parsed = _parse_progress_line(piece)
+                    if parsed:
+                        progress.update(parsed)
+                        _update_state(progress=dict(progress))
+        process.wait()
+        returncode = process.returncode
+    except Exception as e:  # noqa: BLE001
+        _append_log_line(f"\n[-] 다운로드 중 예외 발생: {e}")
+
+    state = _read_state() or {}
+    cancelled = bool(state.get("cancel_requested"))
+
+    extract_error = None
+    extracted_count = None
+    if not cancelled and returncode == 0:
+        staged_file, find_error = _find_single_downloaded_file(staging_dir)
+        if find_error:
+            extract_error = find_error
+        else:
+            _append_log_line(f"\n[*] 압축 해제 중: {os.path.basename(staged_file)} → {dest_dir}")
+            ok, result = _extract_archive(staged_file, dest_dir)
+            if ok:
+                extracted_count = result
+                if keep_archive_after_extract:
+                    try:
+                        archive_dest = os.path.join(dest_dir, os.path.basename(staged_file))
+                        shutil.move(staged_file, archive_dest)
+                        _append_log_line(f"[i] 원본 압축파일 보관: {archive_dest}")
+                    except Exception as e:  # noqa: BLE001
+                        _append_log_line(f"[!] 원본 압축파일 보관 실패(무시하고 계속): {e}")
+            else:
+                extract_error = result
+
+    if cancelled:
+        status = "cancelled"
+        _append_log_line("\n[-] 사용자 요청으로 중단되었습니다.")
+        notify_text = f"⏹️ **[BookOasis] 압축 해제 중단됨**\n목적지: `{dest_dir}`"
+    elif extract_error:
+        status = "error"
+        _append_log_line(f"\n[-] {extract_error}")
+        notify_text = f"❌ **[BookOasis] 압축 해제 실패**\n목적지: `{dest_dir}`\n사유: {extract_error}"
+    elif returncode == 0:
+        status = "success"
+        _append_log_line(f"\n[+] 다운로드 + 압축 해제가 모두 완료되었습니다! ({extracted_count}개 항목)")
+        notify_text = f"✅ **[BookOasis] 압축 해제 완료**\n목적지: `{dest_dir}`"
+        progress["percent"] = 100
+    else:
+        status = "error"
+        _append_log_line(f"\n[-] 다운로드 중 오류가 발생했습니다. (종료 코드: {returncode})")
+        notify_text = f"❌ **[BookOasis] 압축 해제 실패** (종료 코드: {returncode})\n목적지: `{dest_dir}`"
+
+    if status in ("success", "cancelled"):
+        _cleanup_staging_dir(staging_dir)
+    else:
+        _append_log_line(f"[i] 실패 시 받아둔 파일은 보존됩니다: {staging_dir}")
+
+    _update_state(status=status, returncode=returncode, finished_at=time.time(), pid=None, progress=progress)
+    _notify_discord(discord_webhook_url, notify_text)
+
+
 def _run_job(job_id, rclone_path, config_path, rclone_remote, source_id, dest_folder_name,
              discord_webhook_url=None, transfers=8, checkers=16, fast_list=True, source_kind="folder",
              keep_archive_after_extract=False):
@@ -849,7 +963,7 @@ def _run_job(job_id, rclone_path, config_path, rclone_remote, source_id, dest_fo
     _CONFIG_SAVE_HINT_SHOWN = False  # 새 job마다 힌트를 다시 보여줄 수 있게 초기화
 
     source_kind = (source_kind or "folder").strip().lower()
-    if source_kind not in ("folder", "folder_local", "file", "file_local", "folder_extract"):
+    if source_kind not in ("folder", "folder_local", "file", "file_local", "folder_extract", "file_extract"):
         source_kind = "folder"
 
     if source_kind == "folder_extract":
@@ -857,6 +971,17 @@ def _run_job(job_id, rclone_path, config_path, rclone_remote, source_id, dest_fo
         # 완전히 다른 흐름이라, 아래 공유 로직(단일 subprocess + 진행률 파싱)을
         # 타지 않고 전용 함수로 위임한다.
         _run_folder_extract_job(
+            job_id, rclone_path, config_path, rclone_remote, source_id, dest_folder_name,
+            discord_webhook_url=discord_webhook_url,
+            keep_archive_after_extract=keep_archive_after_extract,
+        )
+        return
+
+    if source_kind == "file_extract":
+        # 개별 파일 1개를 다운로드 후 압축 해제 - folder_extract처럼 스테이징을
+        # 거치지만 폴더 스캔 없이 파일 하나만 다루는 훨씬 단순한 흐름이라
+        # 마찬가지로 전용 함수로 위임한다.
+        _run_file_extract_job(
             job_id, rclone_path, config_path, rclone_remote, source_id, dest_folder_name,
             discord_webhook_url=discord_webhook_url,
             keep_archive_after_extract=keep_archive_after_extract,
@@ -1075,6 +1200,12 @@ def start_copy_job(rclone_path, config_path, rclone_remote, source_folder_url, d
         계속 처리하고 끝에 성공/실패 개수를 요약한다.
         keep_archive_after_extract가 True면 압축 해제 후 원본 압축파일도
         해당 폴더에 함께 남겨두고, False(기본)면 정리한다.
+      - "file_extract": "file_local"과 소스(개별 파일 1개)는 같지만, 압축을
+        풀어서 dest_folder_name(**서버의 로컬 절대경로**) 안에 직접 저장한다
+        - folder_extract와 달리 폴더 스캔이 없고 파일 하나만 다루므로, 별도
+        하위 폴더를 만들지 않고 목적지 그 자체에 바로 풀어놓는다. zip/cbz만
+        지원. keep_archive_after_extract가 True면 원본 압축파일도 그 폴더에
+        함께 남겨두고, False(기본)면 정리한다.
 
     source_url_input / dest_input: 변환 전, 사용자가 화면에 실제로 타이핑한 원본
     값(소스는 URL 그대로, 목적지는 마운트 경로일 수도 있는 원본). 새로고침 시
@@ -1093,7 +1224,7 @@ def start_copy_job(rclone_path, config_path, rclone_remote, source_folder_url, d
     dest_folder_name = (dest_folder_name or "").strip()
 
     source_kind = (source_kind or "folder").strip().lower()
-    if source_kind not in ("folder", "folder_local", "file", "file_local", "folder_extract"):
+    if source_kind not in ("folder", "folder_local", "file", "file_local", "folder_extract", "file_extract"):
         source_kind = "folder"
 
     try:
@@ -1151,6 +1282,20 @@ def start_copy_job(rclone_path, config_path, rclone_remote, source_folder_url, d
         # '/data/...'가, Windows 서버에서는 'K:\\다운로드'나 'K:/다운로드'가
         # 각각 절대경로로 정상 인식된다(예전엔 '/'로 시작하는지만 검사해서
         # Windows 드라이브 경로가 전부 거부됐었음 - v2.35.0에서 수정).
+        if not os.path.isabs(dest_folder_name):
+            raise ValueError(
+                "압축 해제 목적지는 서버의 로컬 절대경로여야 합니다 "
+                "(예: POSIX는 /data/comics/시리즈명, Windows는 K:\\다운로드\\시리즈명)."
+            )
+        dest_folder_name_for_job = _normalize_local_abs_path(dest_folder_name)
+        dest_path_display = dest_folder_name_for_job
+    elif source_kind == "file_extract":
+        source_id = get_file_id(source_folder_url)
+        # "file_local"과 소스(개별 파일)는 같지만, 압축을 그대로 두지 않고
+        # 풀어서 저장한다는 점이 다르다. folder_extract와 달리 폴더 스캔이
+        # 없어서 원본 파일 하나를 dest_folder_name(로컬 절대경로)에 바로
+        # 풀어놓는다 - 별도 하위 폴더를 만들지 않으므로, 결과물을 어느
+        # 폴더에 모을지는 사용자가 이 목적지 값으로 직접 정한다.
         if not os.path.isabs(dest_folder_name):
             raise ValueError(
                 "압축 해제 목적지는 서버의 로컬 절대경로여야 합니다 "

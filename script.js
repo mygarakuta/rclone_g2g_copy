@@ -15,11 +15,11 @@
   let lastJobStatus = null; // running | success | error | cancelled | null(아직 없음)
 
   const banner = container.querySelector('[data-role="config-banner"]');
-  const sourceKindFolderRadio = container.querySelector('[data-role="source-kind-folder"]');
-  const sourceKindFolderLocalRadio = container.querySelector('[data-role="source-kind-folder-local"]');
-  const sourceKindFileRadio = container.querySelector('[data-role="source-kind-file"]');
-  const sourceKindFileLocalRadio = container.querySelector('[data-role="source-kind-file-local"]');
-  const sourceKindExtractRadio = container.querySelector('[data-role="source-kind-extract"]');
+  const sourceShapeFolderRadio = container.querySelector('[data-role="source-shape-folder"]');
+  const sourceShapeFileRadio = container.querySelector('[data-role="source-shape-file"]');
+  const destKindRemoteRadio = container.querySelector('[data-role="dest-kind-remote"]');
+  const destKindLocalRadio = container.querySelector('[data-role="dest-kind-local"]');
+  const destKindLocalExtractRadio = container.querySelector('[data-role="dest-kind-local-extract"]');
   const sourceLabel = container.querySelector('[data-role="source-label"]');
   const sourceKindHint = container.querySelector('[data-role="source-kind-hint"]');
   const sourceInput = container.querySelector('[data-role="source-url"]');
@@ -74,28 +74,49 @@
   }
 
   // ==================================================================
-  // 소스 종류(폴더 전체 복사 / 개별 압축파일 1개 그대로 복사 / 개별 파일
-  // 로컬로 다운로드(압축 해제 없음) / 폴더 안 압축파일 일괄 다운로드+
-  // 압축해제) 토글
+  // "소스 종류"(폴더/개별 파일)와 "목적지 종류"(원격/로컬 그대로/로컬
+  // 압축해제)는 서로 독립된 두 축이라, 화면에도 별개의 라디오 그룹
+  // 두 개로 보여준다. 서버에는 이 둘을 조합한 문자열(source_kind)로
+  // 보내야 하므로, COMBINED_KIND_MAP으로 조합/분해한다.
+  //
+  //            원격(remote)   로컬-그대로(local)   로컬-압축해제(local_extract)
+  //   폴더      folder         folder_local          folder_extract
+  //   파일      file           file_local            file_extract
+  //
   // logic.py의 get_folder_id()/get_file_id()와 동일한 URL 패턴을 JS로도
-  // 복제해서, 사용자가 URL을 붙여넣으면 라디오를 자동으로 맞춰준다
-  // (수동으로 직접 바꿀 수도 있음 - 최종 판단은 항상 서버가 다시 검증).
+  // 복제해서, 사용자가 URL을 붙여넣으면 "소스 종류" 라디오만 자동으로
+  // 맞춰준다(수동으로 직접 바꿀 수도 있음 - 최종 판단은 항상 서버가 다시
+  // 검증). "목적지 종류"는 URL과 무관하므로 이 자동 감지가 건드리지 않는다.
   //
-  // "file_local"/"folder_extract" 두 모드는 다른 모드와 "목적지 경로"의
-  // 의미 자체가 다르다 - folder/file은 rclone 원격 경로("remote:path")이고,
-  // file_local/folder_extract는 서버의 로컬 절대경로다(마운트 경로 변환을
-  // 적용하면 안 됨). 그래서 destPreview도 이 두 모드에서는 rclone 변환
-  // 미리보기 대신 안내 문구로 바뀐다.
-  //
-  // folder/folder_extract는 둘 다 소스가 "폴더"라는 점에서 같은 부류고,
-  // file/file_local은 둘 다 소스가 "파일 1개"라는 점에서 같은 부류다 -
-  // isFolderKind()/isFileKind()로 각각 묶어서 자동 감지 로직에 쓴다.
+  // destKind가 "remote"가 아닌 두 모드(local/local_extract)는 다른 모드와
+  // "목적지 경로"의 의미 자체가 다르다 - remote는 rclone 원격 경로
+  // ("remote:path")이고, local/local_extract는 서버의 로컬 절대경로다
+  // (마운트 경로 변환을 적용하면 안 됨). 그래서 destPreview도 destKind가
+  // remote가 아니면 rclone 변환 미리보기 대신 안내 문구로 바뀐다.
   // ==================================================================
+  const COMBINED_KIND_MAP = {
+    'folder|remote': 'folder',
+    'folder|local': 'folder_local',
+    'folder|local_extract': 'folder_extract',
+    'file|remote': 'file',
+    'file|local': 'file_local',
+    'file|local_extract': 'file_extract',
+  };
+  // 역방향(조합된 source_kind -> [shape, destKind]) - 새로고침 복원, 자동
+  // 전환(Windows 경로 감지) 등 source_kind 하나만 갖고 라디오 두 그룹을
+  // 동시에 맞춰야 할 때 쓴다.
+  const KIND_TO_SHAPE_AND_DEST = {};
+  Object.keys(COMBINED_KIND_MAP).forEach((pairKey) => {
+    const combined = COMBINED_KIND_MAP[pairKey];
+    const [shape, destKind] = pairKey.split('|');
+    KIND_TO_SHAPE_AND_DEST[combined] = [shape, destKind];
+  });
+
   const SOURCE_KIND_META = {
     folder: {
       sourceLabel: '소스 폴더 (구글 드라이브 URL 또는 폴더 ID)',
       sourcePlaceholder: 'https://drive.google.com/drive/folders/xxxxxxxxxxxx',
-      sourceHint: '폴더 공유 링크(.../drive/folders/폴더ID) 또는 폴더 ID를 입력하세요. 폴더 안의 파일 전체가 복사됩니다. (구글 드라이브 → 구글 드라이브 - 서버 로컬로 받으려면 "폴더 전체 로컬로 다운로드"를 선택하세요.)',
+      sourceHint: '폴더 공유 링크(.../drive/folders/폴더ID) 또는 폴더 ID를 입력하세요. 폴더 안의 파일 전체가 복사됩니다.',
       destLabel: '목적지 경로 (도커/호스트 마운트 경로 또는 rclone 기준 상대 경로 둘 다 입력 가능 — rclone 원격 경로입니다, 로컬 경로 아님)',
       destPlaceholder: '/mnt/zeeps_member/zeepsmember/공유_폴더명 또는 /zeepsmember/공유_폴더명',
       startLabel: '복사 시작',
@@ -110,10 +131,19 @@
       startLabel: '폴더 전체 로컬로 다운로드 시작',
       showRcloneDestPreview: false,
     },
+    folder_extract: {
+      sourceLabel: '소스 폴더 (구글 드라이브 URL 또는 폴더 ID) — 폴더 안의 압축파일 전체',
+      sourcePlaceholder: 'https://drive.google.com/drive/folders/xxxxxxxxxxxx',
+      sourceHint: '폴더 공유 링크(.../drive/folders/폴더ID) 또는 폴더 ID를 입력하세요. 폴더 안(하위 폴더 포함)의 zip/cbz 파일을 모두 찾아 각각 다운로드 후 압축을 해제합니다.',
+      destLabel: '압축 해제 목적지 (서버의 로컬 절대경로 — rclone 경로 아님. 예: /data/comics/시리즈명 · Windows: K:\\다운로드\\시리즈명)',
+      destPlaceholder: '/data/comics/시리즈명  (Windows 서버라면 K:\\다운로드\\시리즈명)',
+      startLabel: '전체 다운로드 + 압축 해제 시작',
+      showRcloneDestPreview: false,
+    },
     file: {
       sourceLabel: '소스 파일 (구글 드라이브 URL 또는 파일 ID) — 압축파일 1개',
       sourcePlaceholder: 'https://drive.google.com/file/d/xxxxxxxxxxxx/view',
-      sourceHint: '파일 공유 링크(.../file/d/파일ID/view) 또는 파일 ID를 입력하세요. 원본 파일명 그대로 목적지 폴더에 저장됩니다. (구글 드라이브 → 구글 드라이브 - 서버 로컬로 받으려면 "개별 파일 로컬로 다운로드"를 선택하세요.)',
+      sourceHint: '파일 공유 링크(.../file/d/파일ID/view) 또는 파일 ID를 입력하세요. 원본 파일명 그대로 목적지 폴더에 저장됩니다.',
       destLabel: '목적지 경로 (도커/호스트 마운트 경로 또는 rclone 기준 상대 경로 둘 다 입력 가능 — rclone 원격 경로입니다, 로컬 경로 아님)',
       destPlaceholder: '/mnt/zeeps_member/zeepsmember/공유_폴더명 또는 /zeepsmember/공유_폴더명',
       startLabel: '복사 시작',
@@ -128,41 +158,54 @@
       startLabel: '로컬로 다운로드 시작',
       showRcloneDestPreview: false,
     },
-    folder_extract: {
-      sourceLabel: '소스 폴더 (구글 드라이브 URL 또는 폴더 ID) — 폴더 안의 압축파일 전체',
-      sourcePlaceholder: 'https://drive.google.com/drive/folders/xxxxxxxxxxxx',
-      sourceHint: '폴더 공유 링크(.../drive/folders/폴더ID) 또는 폴더 ID를 입력하세요. 폴더 안(하위 폴더 포함)의 zip/cbz 파일을 모두 찾아 각각 다운로드 후 압축을 해제합니다.',
-      destLabel: '압축 해제 목적지 (서버의 로컬 절대경로 — rclone 경로 아님. 예: /data/comics/시리즈명 · Windows: K:\\다운로드\\시리즈명)',
-      destPlaceholder: '/data/comics/시리즈명  (Windows 서버라면 K:\\다운로드\\시리즈명)',
-      startLabel: '전체 다운로드 + 압축 해제 시작',
+    file_extract: {
+      sourceLabel: '소스 파일 (구글 드라이브 URL 또는 파일 ID) — 압축파일 1개',
+      sourcePlaceholder: 'https://drive.google.com/file/d/xxxxxxxxxxxx/view',
+      sourceHint: '파일 공유 링크(.../file/d/파일ID/view) 또는 파일 ID를 입력하세요. 서버로 다운로드한 뒤 압축을 해제해서 목적지 폴더에 바로 풀어놓습니다(zip/cbz만 지원).',
+      destLabel: '압축 해제 목적지 (서버의 로컬 절대경로 — rclone 경로 아님. 예: /data/comics/시리즈명/01권 · Windows: K:\\다운로드\\01권)',
+      destPlaceholder: '/data/comics/시리즈명/01권  (Windows 서버라면 K:\\다운로드\\01권)',
+      startLabel: '다운로드 + 압축 해제 시작',
       showRcloneDestPreview: false,
     },
   };
 
-  function isFolderKind(kind) {
-    return kind === 'folder' || kind === 'folder_local' || kind === 'folder_extract';
+  function getSourceShape() {
+    return (sourceShapeFileRadio && sourceShapeFileRadio.checked) ? 'file' : 'folder';
   }
 
-  function isFileKind(kind) {
-    return kind === 'file' || kind === 'file_local';
+  function getDestKind() {
+    if (destKindLocalExtractRadio && destKindLocalExtractRadio.checked) return 'local_extract';
+    if (destKindLocalRadio && destKindLocalRadio.checked) return 'local';
+    return 'remote';
   }
 
   function getSourceKind() {
-    if (sourceKindExtractRadio && sourceKindExtractRadio.checked) return 'folder_extract';
-    if (sourceKindFileLocalRadio && sourceKindFileLocalRadio.checked) return 'file_local';
-    if (sourceKindFolderLocalRadio && sourceKindFolderLocalRadio.checked) return 'folder_local';
-    if (sourceKindFileRadio && sourceKindFileRadio.checked) return 'file';
-    return 'folder';
+    return COMBINED_KIND_MAP[`${getSourceShape()}|${getDestKind()}`] || 'folder';
   }
 
+  // source_kind 하나로 두 라디오 그룹을 동시에 맞춘다(새로고침 복원, 자동
+  // 전환에 사용). shape만, 또는 destKind만 바꾸고 싶을 때는 이 함수 대신
+  // 아래의 setSourceShape()/setDestKind()를 개별로 쓴다.
   function setSourceKind(kind) {
-    const normalized = SOURCE_KIND_META[kind] ? kind : 'folder';
-    if (sourceKindFolderRadio) sourceKindFolderRadio.checked = normalized === 'folder';
-    if (sourceKindFolderLocalRadio) sourceKindFolderLocalRadio.checked = normalized === 'folder_local';
-    if (sourceKindFileRadio) sourceKindFileRadio.checked = normalized === 'file';
-    if (sourceKindFileLocalRadio) sourceKindFileLocalRadio.checked = normalized === 'file_local';
-    if (sourceKindExtractRadio) sourceKindExtractRadio.checked = normalized === 'folder_extract';
+    const pair = KIND_TO_SHAPE_AND_DEST[kind] || KIND_TO_SHAPE_AND_DEST.folder;
+    setSourceShape(pair[0], { skipRender: true });
+    setDestKind(pair[1], { skipRender: true });
     updateSourceKindUI();
+  }
+
+  function setSourceShape(shape, opts) {
+    const normalized = shape === 'file' ? 'file' : 'folder';
+    if (sourceShapeFolderRadio) sourceShapeFolderRadio.checked = normalized === 'folder';
+    if (sourceShapeFileRadio) sourceShapeFileRadio.checked = normalized === 'file';
+    if (!opts || !opts.skipRender) updateSourceKindUI();
+  }
+
+  function setDestKind(destKind, opts) {
+    const normalized = ['remote', 'local', 'local_extract'].includes(destKind) ? destKind : 'remote';
+    if (destKindRemoteRadio) destKindRemoteRadio.checked = normalized === 'remote';
+    if (destKindLocalRadio) destKindLocalRadio.checked = normalized === 'local';
+    if (destKindLocalExtractRadio) destKindLocalExtractRadio.checked = normalized === 'local_extract';
+    if (!opts || !opts.skipRender) updateSourceKindUI();
   }
 
   function updateSourceKindUI() {
@@ -181,9 +224,12 @@
     const raw = (destInput.value || '').trim();
 
     if (!meta.showRcloneDestPreview) {
-      // folder_extract 모드: rclone 경로 변환이 아니라, "이 로컬 폴더 아래에
-      // 원본 폴더 구조 그대로 압축이 풀린다"는 사실을 안내한다.
-      destPreview.textContent = raw ? `이 서버 로컬 경로 아래에 원본 폴더 구조대로 압축이 해제됩니다: ${raw}` : '';
+      // local/local_extract 목적지: rclone 경로 변환이 아니라, 이 로컬
+      // 경로 아래에 무슨 일이 일어나는지 안내한다.
+      const verb = getDestKind() === 'local_extract'
+        ? '이 서버 로컬 경로에 압축이 해제됩니다'
+        : '이 서버 로컬 경로 아래에 그대로 다운로드됩니다';
+      destPreview.textContent = raw ? `${verb}: ${raw}` : '';
       destPreview.removeAttribute('data-state');
       return;
     }
@@ -215,21 +261,22 @@
     return false;
   }
 
-  // 목적지 입력창에 누가 봐도 Windows 로컬 경로를 입력했는데 아직 "폴더
-  // 전체"/"개별 압축파일"(원격) 모드가 선택돼 있으면, 자동으로 로컬 모드로
+  // 목적지 입력창에 누가 봐도 Windows 로컬 경로를 입력했는데 아직 "목적지
+  // 종류"가 "원격"으로 선택돼 있으면, 자동으로 "로컬(그대로 다운로드)"로
   // 전환해준다 - 서버(_start_copy())도 동일한 안전장치를 갖고 있지만,
   // 시작 버튼을 누르기 전에 화면에서 먼저 바로잡아주는 편이 자연스럽다.
-  // 반대 방향(로컬 -> 원격)으로는 자동 전환하지 않는다 - POSIX 절대경로는
-  // 로컬/원격 어느 쪽 의도인지 문자열만으로 확신할 수 없으므로, 이미 로컬
-  // 모드가 선택된 상태를 함부로 원격으로 되돌리면 안 된다.
+  // "소스 종류"(폴더/파일)는 건드리지 않는다 - 이 판별은 목적지 경로만
+  // 보고 하는 것이라 소스 모양과는 무관하다. 반대 방향(로컬 -> 원격)으로도
+  // 자동 전환하지 않는다 - POSIX 절대경로는 로컬/원격 어느 쪽 의도인지
+  // 문자열만으로 확신할 수 없으므로, 이미 로컬이 선택된 상태를 함부로
+  // 원격으로 되돌리면 안 된다. 압축 해제 여부(local vs local_extract)도
+  // 건드리지 않는다 - "그대로 받을지 풀어서 받을지"는 목적지 경로만으로
+  // 판단할 수 없는 별개의 선택이라 사용자가 직접 고른 값을 존중한다.
   function autoSwitchToLocalIfDestLooksWindowsPath() {
     const dest = (destInput.value || '').trim();
     if (!looksLikeWindowsLocalPath(dest)) return;
-    const current = getSourceKind();
-    if (current === 'folder') {
-      setSourceKind('folder_local');
-    } else if (current === 'file') {
-      setSourceKind('file_local');
+    if (getDestKind() === 'remote') {
+      setDestKind('local');
     }
   }
 
@@ -238,36 +285,26 @@
     autoSwitchToLocalIfDestLooksWindowsPath();
   });
 
-  // URL 패턴으로 폴더/파일을 자동 감지해 라디오를 맞춰준다 (편의 기능 -
-  // 사용자가 직접 라디오를 눌러 덮어쓸 수도 있음).
-  //
-  // folder/folder_extract는 둘 다 "폴더" URL을 받고, file/file_local은 둘 다
-  // "파일" URL을 받는다. 그래서 폴더 URL을 붙여넣었을 때 이미 폴더 계열
-  // (folder/folder_extract) 중 하나가 선택되어 있다면 그대로 두고(사용자의
-  // 명시적 선택 존중), 파일 계열이 선택되어 있을 때만 기본값인 'folder'로
-  // 전환한다. 파일 URL도 마찬가지로 파일 계열끼리는 서로 바꾸지 않는다.
+  // URL 패턴으로 폴더/파일을 자동 감지해 "소스 종류" 라디오만 맞춰준다
+  // (편의 기능 - 사용자가 직접 라디오를 눌러 덮어쓸 수도 있음). "목적지
+  // 종류"는 이 감지와 무관하므로 건드리지 않는다.
   function autoDetectSourceKindFromUrl() {
     const url = (sourceInput.value || '').trim();
     if (!url) return;
-    const current = getSourceKind();
     if (/\/folders\//.test(url)) {
-      if (!isFolderKind(current)) {
-        setSourceKind('folder');
-      }
+      setSourceShape('folder');
     } else if (/\/file\/d\//.test(url) || /[?&]id=/.test(url)) {
-      if (!isFileKind(current)) {
-        setSourceKind('file');
-      }
+      setSourceShape('file');
     }
     // 슬래시 없는 순수 ID만 붙여넣은 경우는 폴더/파일 어느 쪽인지 URL만으로
     // 알 수 없으므로 자동 변경하지 않는다 - 사용자가 라디오로 직접 선택.
   }
 
-  if (sourceKindFolderRadio) sourceKindFolderRadio.addEventListener('change', updateSourceKindUI);
-  if (sourceKindFolderLocalRadio) sourceKindFolderLocalRadio.addEventListener('change', updateSourceKindUI);
-  if (sourceKindFileRadio) sourceKindFileRadio.addEventListener('change', updateSourceKindUI);
-  if (sourceKindFileLocalRadio) sourceKindFileLocalRadio.addEventListener('change', updateSourceKindUI);
-  if (sourceKindExtractRadio) sourceKindExtractRadio.addEventListener('change', updateSourceKindUI);
+  if (sourceShapeFolderRadio) sourceShapeFolderRadio.addEventListener('change', updateSourceKindUI);
+  if (sourceShapeFileRadio) sourceShapeFileRadio.addEventListener('change', updateSourceKindUI);
+  if (destKindRemoteRadio) destKindRemoteRadio.addEventListener('change', updateSourceKindUI);
+  if (destKindLocalRadio) destKindLocalRadio.addEventListener('change', updateSourceKindUI);
+  if (destKindLocalExtractRadio) destKindLocalExtractRadio.addEventListener('change', updateSourceKindUI);
   sourceInput.addEventListener('input', autoDetectSourceKindFromUrl);
   updateSourceKindUI(); // 초기 라벨/플레이스홀더 세팅
 
@@ -337,13 +374,13 @@
     // "중단"이 눌러도 안 먹히거나 실제로는 안 도는데 running으로 남아있는
     // 꼬인 상황을 위한 탈출구 - 실행 중일 때 같이 보여준다.
     resetBtn.hidden = !isRunning;
-    // 실행 중에는 소스 종류를 바꿔도 이미 시작된 job에는 반영되지 않으므로
-    // 혼동을 막기 위해 라디오를 잠근다.
-    if (sourceKindFolderRadio) sourceKindFolderRadio.disabled = isRunning;
-    if (sourceKindFolderLocalRadio) sourceKindFolderLocalRadio.disabled = isRunning;
-    if (sourceKindFileRadio) sourceKindFileRadio.disabled = isRunning;
-    if (sourceKindFileLocalRadio) sourceKindFileLocalRadio.disabled = isRunning;
-    if (sourceKindExtractRadio) sourceKindExtractRadio.disabled = isRunning;
+    // 실행 중에는 소스/목적지 종류를 바꿔도 이미 시작된 job에는 반영되지
+    // 않으므로 혼동을 막기 위해 두 라디오 그룹 모두 잠근다.
+    if (sourceShapeFolderRadio) sourceShapeFolderRadio.disabled = isRunning;
+    if (sourceShapeFileRadio) sourceShapeFileRadio.disabled = isRunning;
+    if (destKindRemoteRadio) destKindRemoteRadio.disabled = isRunning;
+    if (destKindLocalRadio) destKindLocalRadio.disabled = isRunning;
+    if (destKindLocalExtractRadio) destKindLocalExtractRadio.disabled = isRunning;
   }
 
   function formatProgressDetail(progress) {
@@ -420,6 +457,7 @@
     }
     const KIND_PREFIX_LABEL = {
       folder_extract: '[일괄압축해제] ',
+      file_extract: '[압축해제] ',
       file_local: '[파일 로컬] ',
       folder_local: '[폴더 로컬] ',
       file: '[파일] ',
@@ -511,17 +549,19 @@
 
   function startCopy() {
     const sourceKind = getSourceKind();
+    const sourceShape = getSourceShape();
+    const destKind = getDestKind();
     const sourceUrl = (sourceInput.value || '').trim();
     const destFolder = (destInput.value || '').trim();
 
     if (!sourceUrl) {
       statusText.textContent =
-        isFileKind(sourceKind) ? '소스 파일 URL(또는 ID)을 입력해주세요.' : '소스 폴더 URL(또는 ID)을 입력해주세요.';
+        sourceShape === 'file' ? '소스 파일 URL(또는 ID)을 입력해주세요.' : '소스 폴더 URL(또는 ID)을 입력해주세요.';
       return;
     }
     if (!destFolder) {
       statusText.textContent =
-        (sourceKind === 'folder_extract' || sourceKind === 'file_local' || sourceKind === 'folder_local')
+        destKind !== 'remote'
           ? '다운로드 목적지(로컬 절대경로)를 입력해주세요.'
           : '목적지 경로를 입력해주세요.';
       return;
