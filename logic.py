@@ -542,7 +542,13 @@ def _extract_archive(archive_path, dest_dir):
 
 
 def _kind_label(source_kind):
-    return {"folder": "폴더 복사", "file": "파일 복사", "folder_extract": "일괄 압축 해제"}.get(source_kind, "복사")
+    return {
+        "folder": "폴더 복사",
+        "folder_local": "폴더 로컬 다운로드",
+        "file": "파일 복사",
+        "file_local": "로컬 다운로드",
+        "folder_extract": "일괄 압축 해제",
+    }.get(source_kind, "복사")
 
 
 def _list_archive_files_in_folder(rclone_path, config_path, rclone_remote, folder_id):
@@ -816,7 +822,7 @@ def _run_job(job_id, rclone_path, config_path, rclone_remote, source_id, dest_fo
     _CONFIG_SAVE_HINT_SHOWN = False  # 새 job마다 힌트를 다시 보여줄 수 있게 초기화
 
     source_kind = (source_kind or "folder").strip().lower()
-    if source_kind not in ("folder", "file", "folder_extract"):
+    if source_kind not in ("folder", "folder_local", "file", "file_local", "folder_extract"):
         source_kind = "folder"
 
     if source_kind == "folder_extract":
@@ -830,7 +836,33 @@ def _run_job(job_id, rclone_path, config_path, rclone_remote, source_id, dest_fo
         )
         return
 
-    if source_kind == "file":
+    if source_kind == "file_local":
+        # 개별 파일을 압축 해제 없이 "원본 그대로" 서버 로컬 절대경로에
+        # 다운로드한다("file" 모드와 소스는 같지만 목적지가 rclone 원격이
+        # 아니라 로컬이라는 점이 다름 - 압축 해제까지 하는 folder_extract와도
+        # 다름: 이 모드는 폴더가 아니라 파일 하나, 압축을 풀지 않고 그대로
+        # 저장). dest_folder_name은 start_copy_job()에서 이미 로컬 절대경로로
+        # 검증/정규화되어 들어온다. copyid는 목적지 끝에 구분자가 있어야
+        # 원본 파일명 그대로 그 디렉터리 아래에 저장하므로, 로컬 경로답게
+        # OS에 맞는 구분자(os.sep)를 붙인다(rclone 원격 경로처럼 무조건 '/'를
+        # 붙이면 Windows에서 구분자가 섞여버림).
+        dest_path = dest_folder_name if dest_folder_name.endswith(os.sep) else dest_folder_name + os.sep
+        cmd = [
+            rclone_path,
+            "backend",
+            "copyid",
+            f"{rclone_remote}:",
+            source_id,
+            dest_path,
+            "--config",
+            config_path,
+            "--progress",
+        ]
+        source_line = f"[*] 소스 파일 ID      : {source_id}"
+        mode_line = "[*] 복사 방식         : 개별 파일 로컬 다운로드 (rclone backend copyid, 압축 해제 없음)"
+        final_dest_display = dest_path
+
+    elif source_kind == "file":
         # 개별 파일(압축파일 1개)은 root_folder_id 트릭이 통하지 않는다 -
         # 그 트릭은 remote의 루트를 특정 "폴더"로 가장하는 방식이라 폴더
         # 전용이다. 대신 rclone의 ID 기반 단일 파일 복사 기능을 쓴다.
@@ -844,6 +876,14 @@ def _run_job(job_id, rclone_path, config_path, rclone_remote, source_id, dest_fo
         # copyid' command", rclone 공식 포럼 확인 완료). 내부적으로는
         # operations.Copy()를 그대로 쓰므로 --progress 통계 라인은 폴더
         # 모드와 동일하게 찍힌다.
+        #
+        # !! 주의 !! 이 모드의 목적지는 항상 "{rclone_remote}:경로" -
+        # rclone 원격(=구글 드라이브) 안의 위치다. 로컬 디스크에 그대로
+        # 받고 싶다면 이 모드가 아니라 "file_local"을 써야 한다 - 실사용
+        # 중 이 모드에 로컬 경로(K:\...)를 입력했다가 rclone이 그걸 원격
+        # 경로 문자열로 오인해서("libgdrive_oauth:K:다운로드/") 엉뚱하게
+        # 동작한 사례가 있었다(로컬 저장이 되지 않고, 구글 드라이브 안에
+        # "K:다운로드"라는 이름의 경로로 복사를 시도하게 됨).
         dest_path = f"{rclone_remote}:{dest_folder_name}"
         cmd = [
             rclone_path,
@@ -860,15 +900,17 @@ def _run_job(job_id, rclone_path, config_path, rclone_remote, source_id, dest_fo
         mode_line = "[*] 복사 방식         : 개별 파일 (rclone backend copyid)"
         final_dest_display = dest_path
 
-    else:  # "folder"
+    else:  # "folder" 또는 "folder_local" - root_folder_id 트릭은 둘 다 동일하고
+           # 목적지만 rclone 원격이냐 로컬이냐로 갈린다.
         source_path = f"{rclone_remote},root_folder_id={source_id}:"
-        dest_path = f"{rclone_remote}:{dest_folder_name}"
+        dest_path = dest_folder_name if source_kind == "folder_local" else f"{rclone_remote}:{dest_folder_name}"
 
         # 기본값(rclone: --transfers=4, --checkers=8)만으로는 구글 드라이브
         # 서버사이드 복사(파일마다 독립적인 API 호출) 성능이 잘 안 나오는 경우가
         # 많다. 동시 처리 개수를 늘리면 API 라운드트립 지연을 훨씬 잘 가려준다
         # (단, 너무 높이면 구글 API 레이트리밋(403)에 걸려 오히려 재시도로
-        # 느려질 수 있으니 설정에서 조절 가능하게 함).
+        # 느려질 수 있으니 설정에서 조절 가능하게 함). 로컬 목적지(folder_local)
+        # 라도 다운로드 자체는 여전히 파일마다 개별 API 호출이라 동일하게 적용된다.
         cmd = [
             rclone_path,
             "copy",
@@ -887,10 +929,13 @@ def _run_job(job_id, rclone_path, config_path, rclone_remote, source_id, dest_fo
             # (메모리를 좀 더 쓰는 대신 훨씬 빠르게 전체 목록을 가져옴).
             cmd.append("--fast-list")
         source_line = f"[*] 소스 폴더 ID      : {source_id}"
-        mode_line = (
-            f"[*] 동시성            : --transfers={transfers} --checkers={checkers}"
-            + (" --fast-list" if fast_list else "")
+        concurrency_note = (
+            f"--transfers={transfers} --checkers={checkers}" + (" --fast-list" if fast_list else "")
         )
+        if source_kind == "folder_local":
+            mode_line = f"[*] 복사 방식         : 폴더 전체 로컬 다운로드 (rclone copy, 압축 해제 없음) · {concurrency_note}"
+        else:
+            mode_line = f"[*] 동시성            : {concurrency_note}"
         final_dest_display = dest_path
 
     _append_log_line("=" * 60)
@@ -900,7 +945,10 @@ def _run_job(job_id, rclone_path, config_path, rclone_remote, source_id, dest_fo
     _append_log_line(f"[*] 목적지 경로       : {final_dest_display}")
     _append_log_line(mode_line)
     _append_log_line("=" * 60)
-    _append_log_line("[*] 서버사이드 복사를 시작합니다...\n")
+    if source_kind in ("file_local", "folder_local"):
+        _append_log_line("[*] 로컬로 다운로드를 시작합니다...\n")
+    else:
+        _append_log_line("[*] 서버사이드 복사를 시작합니다...\n")
 
     returncode = None
     process = None
@@ -977,10 +1025,20 @@ def start_copy_job(rclone_path, config_path, rclone_remote, source_folder_url, d
     source_kind:
       - "folder"(기본): 폴더 전체를 rclone copy(root_folder_id 트릭)로 복사.
         dest_folder_name은 rclone 원격 경로("remote:path")의 path 부분.
+      - "folder_local": "folder"와 소스(폴더 전체)는 같지만, 목적지가 rclone
+        원격이 아니라 **서버의 로컬 절대경로**다 - 압축 해제 없이 폴더/파일
+        구조를 그대로 그 경로 아래에 다운로드한다("folder" 모드에 로컬
+        경로를 넣으면 rclone이 그걸 원격 경로 문자열로 오인해 엉뚱하게
+        동작하는 사례가 있어 file/file_local과 같은 이유로 분리했다).
       - "file": 개별 압축파일 1개를 `rclone backend copyid`로 그대로 복사
         (구글 드라이브 -> 구글 드라이브). dest_folder_name도 rclone 원격 경로.
         목적지 경로 끝에 '/'를 보장해, rclone이 원본 파일명을 그대로 써서
         그 디렉터리 아래에 저장하도록 만든다.
+      - "file_local": "file"과 소스(개별 파일 1개)는 같지만, 목적지가 rclone
+        원격이 아니라 **서버의 로컬 절대경로**다(folder_extract와 같은 종류의
+        경로) - 다만 압축 해제는 하지 않고 원본 파일을 그대로 그 경로 아래에
+        저장한다("file" 모드에 로컬 경로를 넣으면 rclone이 그걸 원격 경로
+        문자열로 오인해 엉뚱하게 동작하는 사례가 있어 분리했다).
       - "folder_extract": **소스 폴더**(파일 1개가 아니라 폴더) 안의 모든
         zip/cbz 파일을 재귀적으로 찾아, 파일마다 서버 로컬 스테이징 폴더로
         내려받은 뒤(`rclone backend copyid`) 파이썬 zipfile로 압축을 풀어
@@ -1008,7 +1066,7 @@ def start_copy_job(rclone_path, config_path, rclone_remote, source_folder_url, d
     dest_folder_name = (dest_folder_name or "").strip()
 
     source_kind = (source_kind or "folder").strip().lower()
-    if source_kind not in ("folder", "file", "folder_extract"):
+    if source_kind not in ("folder", "folder_local", "file", "file_local", "folder_extract"):
         source_kind = "folder"
 
     try:
@@ -1026,7 +1084,32 @@ def start_copy_job(rclone_path, config_path, rclone_remote, source_folder_url, d
         raise ValueError("목적지 경로를 입력해주세요.")
 
     _validate_config(rclone_path, config_path)
-    if source_kind == "file":
+    if source_kind == "folder_local":
+        source_id = get_folder_id(source_folder_url)
+        # "folder"와 소스(폴더 전체)는 같지만, 목적지는 rclone 원격이 아니라
+        # file_local/folder_extract와 마찬가지로 "서버 로컬 절대경로"다 -
+        # 압축은 전혀 건드리지 않고 원본 파일/폴더 구조를 그대로 받는다는
+        # 점만 folder_extract와 다르다.
+        if not os.path.isabs(dest_folder_name):
+            raise ValueError(
+                "폴더 다운로드 목적지는 서버의 로컬 절대경로여야 합니다 "
+                "(예: POSIX는 /data/downloads, Windows는 K:\\다운로드)."
+            )
+        dest_folder_name_for_job = _normalize_local_abs_path(dest_folder_name)
+        dest_path_display = dest_folder_name_for_job
+    elif source_kind == "file_local":
+        source_id = get_file_id(source_folder_url)
+        # "file"과 소스(개별 파일)는 같지만, 목적지는 rclone 원격이 아니라
+        # folder_extract와 마찬가지로 "서버 로컬 절대경로"다 - 압축은 풀지
+        # 않고 원본 파일 그대로 받는다는 점만 folder_extract와 다르다.
+        if not os.path.isabs(dest_folder_name):
+            raise ValueError(
+                "다운로드 목적지는 서버의 로컬 절대경로여야 합니다 "
+                "(예: POSIX는 /data/downloads, Windows는 K:\\다운로드)."
+            )
+        dest_folder_name_for_job = _normalize_local_abs_path(dest_folder_name)
+        dest_path_display = dest_folder_name_for_job
+    elif source_kind == "file":
         source_id = get_file_id(source_folder_url)
         # copyid는 목적지 경로 끝의 '/' 유무로 "디렉터리 안에 원본 파일명대로
         # 저장" 여부를 판단하므로, 항상 슬래시를 보장해 원본 파일명을 유지한다.

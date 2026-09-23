@@ -3,7 +3,7 @@
     <div class="rgc-header-icon">📁</div>
     <div class="rgc-header-text">
       <h2>폴더 복사 (rclone G2G)</h2>
-      <p>rclone을 이용해 구글 드라이브 폴더/파일을 서버사이드로 복사하거나, 폴더 안의 압축파일들을 다운로드해 로컬에 일괄 압축 해제합니다.</p>
+      <p>rclone을 이용해 구글 드라이브 폴더/파일을 다른 구글 드라이브 위치로 서버사이드 복사하거나, 서버(또는 로컬 드라이브)로 그대로 다운로드하거나, 폴더 안의 압축파일들을 다운로드해 일괄 압축 해제합니다.</p>
     </div>
   </div>
 
@@ -17,11 +17,19 @@
       <div class="rgc-radio-group" data-role="source-kind-group" role="radiogroup" aria-label="소스 종류">
         <label class="rgc-radio">
           <input type="radio" name="rgc-source-kind" value="folder" data-role="source-kind-folder" checked />
-          <span>📁 폴더 전체</span>
+          <span>📁 폴더 전체 (구글 드라이브 → 구글 드라이브)</span>
+        </label>
+        <label class="rgc-radio">
+          <input type="radio" name="rgc-source-kind" value="folder_local" data-role="source-kind-folder-local" />
+          <span>📁→💾 폴더 전체 로컬로 다운로드 (압축 해제 없음)</span>
         </label>
         <label class="rgc-radio">
           <input type="radio" name="rgc-source-kind" value="file" data-role="source-kind-file" />
-          <span>📦 개별 압축파일 (zip/cbz 등 1개)</span>
+          <span>📦 개별 압축파일 (zip/cbz 등 1개, 구글 드라이브 → 구글 드라이브)</span>
+        </label>
+        <label class="rgc-radio">
+          <input type="radio" name="rgc-source-kind" value="file_local" data-role="source-kind-file-local" />
+          <span>📦→💾 개별 파일 로컬로 다운로드 (압축 해제 없음)</span>
         </label>
         <label class="rgc-radio">
           <input type="radio" name="rgc-source-kind" value="folder_extract" data-role="source-kind-extract" />

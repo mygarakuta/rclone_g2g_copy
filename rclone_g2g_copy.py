@@ -27,7 +27,37 @@ guide_plugins.md 2장 "서브프로세스 실행 차단(기본값)" 규칙에 �
 .env에 ALLOW_PLUGIN_SUBPROCESS=true를 설정하지 않으면 이 플러그인은 로드 자체가
 거부됩니다. (→ 이 배포 환경에서는 이미 설정 완료됨)
 
-변경 이력(이번 수정, v2.35.1):
+변경 이력(이번 수정, v2.37.0):
+- **"폴더 전체를 압축 해제 없이 서버 로컬로 그대로 다운로드"하는
+  "folder_local" 모드를 추가했습니다.** 사용자가 세 가지 시나리오로 요구
+  사항을 정리해 확인을 요청했습니다: ① 폴더 → 목적지 폴더 하부에 폴더
+  그대로 복사, ② 개별 파일 → 목적지 폴더 하부에 파일 그대로 복사, ③ 압축
+  파일 → 임시로 받은 뒤 목적지 폴더 하부에 압축 해제(폴더 구조 포함). ②는
+  기존 `file_local`, ③은 기존 `folder_extract`가 이미 정확히 대응하고
+  있었지만, ①(폴더를 압축 해제 없이 그대로 로컬에 복사)에 대응하는 모드가
+  없어서 새로 추가했습니다. 소스는 "folder"(폴더 전체)와 동일하지만,
+  목적지가 rclone 원격이 아니라 file_local/folder_extract와 같은 서버 로컬
+  절대경로입니다. `rclone copy`(root_folder_id 트릭)를 그대로 쓰되 목적지만
+  로컬 경로로 바뀝니다 - `--transfers`/`--checkers`/`--fast-list` 동시성
+  옵션도 "folder" 모드와 동일하게 적용됩니다(여러 파일을 받으므로 의미가
+  있음, file_local과의 차이점). 소스 종류 라디오에 "📁→💾 폴더 전체
+  로컬로 다운로드(압축 해제 없음)"가 추가됐습니다.
+
+변경 이력(v2.36.0):
+- **개별 파일을 압축 해제 없이 서버 로컬로 그대로 다운로드하는 "file_local"
+  모드를 추가했습니다.** 실사용 중 "개별 압축파일" 모드(`file`)의 목적지에
+  로컬 경로(`K:\다운로드`)를 입력했다가, rclone이 그걸 원격 경로 문자열로
+  오인해 `libgdrive_oauth:K:다운로드/`처럼 엉뚱하게 동작(로컬 저장이 되지
+  않음)하는 사례가 보고됐습니다. 원인: `file` 모드는 "구글 드라이브 →
+  구글 드라이브" 전용으로 설계되어 있어 목적지가 항상 `{rclone_remote}:`
+  접두사가 붙는 rclone 원격 경로로 취급됩니다. 압축 해제 없이 파일 하나를
+  서버 로컬 디스크에 그대로 받는 용도의 모드가 없었던 것이 근본 원인이라,
+  새 모드를 추가해 그 빈틈을 메꿨습니다. 소스는 "file"과 동일(개별 파일
+  URL/ID)하지만, 목적지는 folder_extract와 같은 종류의 **서버 로컬
+  절대경로**이고 압축은 풀지 않습니다. 소스 종류 라디오에 "📦→💾 개별 파일
+  로컬로 다운로드(압축 해제 없음)"가 추가됐습니다.
+
+변경 이력(v2.35.1):
 - **"폴더 안 압축파일 일괄 압축 해제" 모드의 목적지 필드 라벨에 Windows
   예시(`K:\다운로드\시리즈명`)를 플레이스홀더뿐 아니라 라벨 텍스트 자체에도
   항상 보이도록 추가했습니다** (플레이스홀더는 입력을 시작하면 사라져서
@@ -326,32 +356,41 @@ class RcloneG2gCopyProvider(BaseMetadataProvider):
     def _start_copy(self, db_type, item_data):
         source_url = str(item_data.get("source_url", "")).strip()
         dest_input = str(item_data.get("dest_folder_name", "")).strip()
-        # "folder"(소스 폴더 전체 복사) / "file"(개별 압축파일 1개 그대로 복사) /
-        # "folder_extract"(소스 폴더 안의 압축파일들을 각각 다운로드 후 로컬에
-        # 압축 해제 - 소스가 "폴더"라는 점에서 folder와 같고, file과는 다름).
+        # "folder"(소스 폴더 전체를 원격에 그대로 복사) / "folder_local"(소스
+        # 폴더 전체를 압축 해제 없이 서버 로컬에 그대로 다운로드) /
+        # "file"(개별 압축파일 1개 그대로 원격에 복사) / "file_local"(개별
+        # 파일 1개를 압축 해제 없이 서버 로컬에 그대로 다운로드) /
+        # "folder_extract"(소스 폴더 안의 압축파일들을 각각 다운로드 후
+        # 로컬에 압축 해제 - 소스가 "폴더"라는 점에서 folder/folder_local과
+        # 같고, file/file_local과는 다름).
         # index.html의 라디오 버튼에서 선택되어 넘어온다 - 생략되면 하위 호환을
         # 위해 기존 동작(folder)을 그대로 유지한다.
         source_kind = str(item_data.get("source_kind", "folder")).strip().lower()
-        if source_kind not in ("folder", "file", "folder_extract"):
+        if source_kind not in ("folder", "folder_local", "file", "file_local", "folder_extract"):
             source_kind = "folder"
 
+        is_file_source = source_kind in ("file", "file_local")  # 폴더가 아니라 파일 1개가 소스인 모드들
+        is_local_dest = source_kind in ("folder_local", "file_local", "folder_extract")  # 목적지가 rclone 원격이 아니라 서버 로컬인 모드들
+
         if not source_url:
-            # folder/folder_extract는 둘 다 "소스 폴더"를 받는다.
-            if source_kind == "file":
+            if is_file_source:
                 return False, "소스 파일 URL(또는 ID)을 입력해주세요."
             return False, "소스 폴더 URL(또는 ID)을 입력해주세요."
         if not dest_input:
-            if source_kind == "folder_extract":
-                return False, "압축 해제 목적지(로컬 절대경로)를 입력해주세요."
+            if is_local_dest:
+                return False, "다운로드 목적지(로컬 절대경로)를 입력해주세요."
             return False, "목적지 경로를 입력해주세요."
 
         config = self._get_config(db_type)
 
-        if source_kind == "folder_extract":
-            # 이 모드의 목적지는 rclone 원격 경로가 아니라 "서버 로컬
+        if is_local_dest:
+            # 이 모드들의 목적지는 rclone 원격 경로가 아니라 "서버 로컬
             # 절대경로"이므로, 마운트 접두사 변환(to_rclone_relative_path)을
             # 적용하지 않고 사용자가 입력한 값을 그대로 넘긴다. 절대경로
-            # 검증(맨 앞이 '/')은 logic.start_copy_job()에서 한 번 더 한다.
+            # 검증(os.path.isabs)은 logic.start_copy_job()에서 한 번 더 한다.
+            # ("file" 모드에 이런 로컬 경로를 잘못 넣으면 rclone이 그걸 원격
+            # 경로 문자열로 오인해 엉뚱하게 동작하므로, 반드시 소스 종류를
+            # 올바르게 골라야 한다 - 위 두 함수의 주석 참고.)
             dest_folder_name = dest_input
         else:
             mount_prefix = resolve_mount_prefix(config.get("MOUNT_PREFIX"), config.get("RCLONE_REMOTE"))
@@ -378,9 +417,17 @@ class RcloneG2gCopyProvider(BaseMetadataProvider):
         except (ValueError, RuntimeError) as e:
             return False, str(e)
 
-        kind_label = {"folder": "폴더", "file": "파일", "folder_extract": "일괄 압축 해제"}[source_kind]
+        kind_label = {
+            "folder": "폴더",
+            "folder_local": "폴더 로컬 다운로드",
+            "file": "파일",
+            "file_local": "로컬 다운로드",
+            "folder_extract": "일괄 압축 해제",
+        }[source_kind]
         if source_kind == "folder_extract":
             return True, "폴더 안 압축파일 목록을 조회하고 있습니다. 진행 상황은 화면 하단 로그에서 확인하세요."
+        if source_kind in ("file_local", "folder_local"):
+            return True, "로컬로 다운로드를 시작했습니다. 진행 상황은 화면 하단 로그에서 확인하세요."
         if dest_folder_name != dest_input:
             return True, (
                 f"{kind_label} 복사를 시작했습니다. "
