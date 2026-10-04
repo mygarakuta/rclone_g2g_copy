@@ -502,8 +502,19 @@ _SUPPORTED_ARCHIVE_EXTS = {".zip", ".cbz"}
 _STAGING_ROOT = os.path.join(DATA_DIR, "staging")
 
 
+# 사용자가 설정(STAGING_DIR)으로 임시 다운로드 폴더를 직접 지정한 경우의
+# 루트. job을 시작할 때(start_copy_job) 매번 새로 정해진다 - 한 번에 job이
+# 하나만 돌기 때문에 모듈 전역으로 두어도 안전하다. None이면 기본값
+# (_STAGING_ROOT, 플러그인 데이터 폴더 아래)을 쓴다.
+_STAGING_ROOT_OVERRIDE = None
+
+
+def _staging_root():
+    return _STAGING_ROOT_OVERRIDE or _STAGING_ROOT
+
+
 def _staging_dir_for_job(job_id):
-    return os.path.join(_STAGING_ROOT, job_id)
+    return os.path.join(_staging_root(), job_id)
 
 
 def _cleanup_staging_dir(staging_dir):
@@ -654,6 +665,7 @@ def _run_folder_extract_job(job_id, rclone_path, config_path, rclone_remote, fol
     _append_log_line(f"[*] 소스 폴더 ID      : {folder_id}")
     _append_log_line(f"[*] 목적지 경로       : {dest_root_dir}")
     _append_log_line("[*] 복사 방식         : 폴더 내 압축파일 일괄 다운로드 + 압축 해제 (rclone backend copyid → zip 추출)")
+    _append_log_line(f"[*] 임시 다운로드 폴더 : {_staging_root()}")
     _append_log_line("=" * 60)
     _append_log_line("[*] 폴더 안의 압축파일 목록을 조회합니다...\n")
 
@@ -860,6 +872,7 @@ def _run_file_extract_job(job_id, rclone_path, config_path, rclone_remote, file_
     _append_log_line(f"[*] 소스 파일 ID      : {file_id}")
     _append_log_line(f"[*] 목적지 경로       : {dest_dir}")
     _append_log_line("[*] 복사 방식         : 개별 파일 다운로드 후 압축 해제 (rclone backend copyid → zip 추출)")
+    _append_log_line(f"[*] 임시 다운로드 폴더 : {_staging_root()}")
     _append_log_line("=" * 60)
     _append_log_line("[*] 다운로드를 시작합니다...\n")
 
@@ -1168,7 +1181,7 @@ def _run_job(job_id, rclone_path, config_path, rclone_remote, source_id, dest_fo
 def start_copy_job(rclone_path, config_path, rclone_remote, source_folder_url, dest_folder_name,
                     source_url_input=None, dest_input=None, discord_webhook_url=None,
                     transfers=8, checkers=16, fast_list=True, source_kind="folder",
-                    keep_archive_after_extract=False):
+                    keep_archive_after_extract=False, staging_dir=None):
     """
     유효성 검사 후 백그라운드 스레드로 rclone copy(또는 backend copyid, 또는
     다운로드+zip 압축 해제)를 시작합니다. 이미 실행 중인(그리고 실제로
@@ -1206,6 +1219,14 @@ def start_copy_job(rclone_path, config_path, rclone_remote, source_folder_url, d
         하위 폴더를 만들지 않고 목적지 그 자체에 바로 풀어놓는다. zip/cbz만
         지원. keep_archive_after_extract가 True면 원본 압축파일도 그 폴더에
         함께 남겨두고, False(기본)면 정리한다.
+
+    staging_dir: 압축 해제 모드(folder_extract/file_extract)에서 압축파일을
+    잠깐 받아두는 임시 폴더의 루트(서버 로컬 절대경로). 비우면 플러그인
+    데이터 폴더 아래(기본값)를 쓴다. 큰 압축파일을 받을 때 앱이 설치된
+    드라이브(C:)의 용량/속도 대신 여유 있는 디스크를 쓰고 싶을 때 지정한다.
+    그 아래에 job마다 별도 하위 폴더를 만들고, 끝나면 그 하위 폴더만
+    지운다(지정한 루트 폴더 자체는 지우지 않는다). 압축 해제 모드가 아니면
+    무시된다.
 
     source_url_input / dest_input: 변환 전, 사용자가 화면에 실제로 타이핑한 원본
     값(소스는 URL 그대로, 목적지는 마운트 경로일 수도 있는 원본). 새로고침 시
@@ -1311,6 +1332,24 @@ def start_copy_job(rclone_path, config_path, rclone_remote, source_folder_url, d
     existing = _read_state()
     if existing and existing.get("status") == "running" and _process_is_alive(existing.get("pid")):
         raise RuntimeError("이미 실행 중인 복사 작업이 있습니다. 완료 또는 중단 후 다시 시도해주세요.")
+
+    # 임시 다운로드 폴더(STAGING_DIR) - 압축 해제 모드에서만 의미가 있다.
+    # 매 job마다 override를 새로 정한다(이전 job의 값이 남아 있으면 안 됨).
+    global _STAGING_ROOT_OVERRIDE
+    _STAGING_ROOT_OVERRIDE = None
+    staging_dir = (staging_dir or "").strip()
+    if staging_dir and source_kind in ("folder_extract", "file_extract"):
+        if not os.path.isabs(staging_dir):
+            raise ValueError(
+                "임시 다운로드 폴더(STAGING_DIR)는 서버의 로컬 절대경로여야 합니다 "
+                "(예: POSIX는 /data/tmp, Windows는 K:\\임시)."
+            )
+        staging_dir = _normalize_local_abs_path(staging_dir)
+        try:
+            os.makedirs(staging_dir, exist_ok=True)
+        except Exception as e:  # noqa: BLE001
+            raise ValueError(f"임시 다운로드 폴더를 만들 수 없습니다 ({staging_dir}): {e}")
+        _STAGING_ROOT_OVERRIDE = staging_dir
 
     job_id = uuid.uuid4().hex[:12]
     _reset_log()

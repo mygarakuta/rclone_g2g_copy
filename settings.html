@@ -155,6 +155,28 @@
   </p>
 
   <div class="rgc-field">
+    <label for="rgc-staging-dir">STAGING_DIR (선택 — 임시 다운로드 폴더)</label>
+    <input
+      type="text"
+      id="rgc-staging-dir"
+      name="STAGING_DIR"
+      placeholder="K:\임시   또는   /data/tmp"
+      autocomplete="off"
+    />
+    <p class="rgc-field-hint">
+      "압축 해제" 목적지를 쓸 때, 압축파일을 풀기 전에 <strong>잠깐 받아두는
+      임시 폴더</strong>의 서버 로컬 절대경로입니다. 비워두면 플러그인 데이터
+      폴더(보통 BookOasis가 설치된 드라이브) 아래를 씁니다 - 용량이 큰
+      압축파일을 받을 때 그 드라이브 공간이 부족하다면 여유 있는 디스크의
+      폴더를 지정하세요. 압축 해제가 끝나면 그 job의 임시 파일은 자동으로
+      지워지고(지정한 폴더 자체는 남음), 목적지로 따로 MOVE할 필요는
+      없습니다.<br />
+      <strong>주의:</strong> BookOasis 라이브러리로 등록된 폴더 안은 피하세요
+      (받는 도중의 압축파일이 책으로 스캔될 수 있음).
+    </p>
+  </div>
+
+  <div class="rgc-field">
     <label for="rgc-keep-archive">
       <input
         type="checkbox"

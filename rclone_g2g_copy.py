@@ -27,7 +27,19 @@ guide_plugins.md 2장 "서브프로세스 실행 차단(기본값)" 규칙에 �
 .env에 ALLOW_PLUGIN_SUBPROCESS=true를 설정하지 않으면 이 플러그인은 로드 자체가
 거부됩니다. (→ 이 배포 환경에서는 이미 설정 완료됨)
 
-변경 이력(이번 수정, v2.39.1):
+변경 이력(이번 수정, v2.40.0):
+- **압축 해제 모드의 임시 다운로드 폴더를 설정(STAGING_DIR)으로 직접 정할 수
+  있게 했습니다.** "구글 드라이브 압축파일을 A 폴더에 받아 풀고 다시 B로
+  MOVE하는 두 번의 작업을 하고 있다"는 문의에서 출발했습니다. 압축 해제
+  목적지를 쓰면 이미 한 번의 job으로 B에 직접 풀리고(MOVE 불필요) 임시로
+  받은 압축파일은 자동 삭제되지만, 그 임시 폴더가 플러그인 데이터 폴더
+  (보통 앱이 설치된 C:) 안에 고정돼 있어 용량이 큰 압축파일은 C: 공간/속도가
+  병목이었습니다. 비우면 기존 위치(기본값), 지정하면 그 아래 job별 하위
+  폴더를 쓰며 끝나면 그 하위 폴더만 지웁니다(지정 폴더 자체는 유지).
+  상대경로는 거부하고, 압축 해제 모드가 아니면 무시합니다. 압축 해제 job
+  로그에는 실제 사용 중인 임시 폴더 경로가 표시됩니다.
+
+변경 이력(v2.39.1):
 - "소스 종류" 라디오 라벨을 "폴더"/"개별 파일"에서 **"구글 드라이브 폴더"/
   "구글 드라이브 개별 파일"**로 바꿨습니다. 소스는 항상 구글 드라이브이고
   "목적지 종류"(원격/로컬)와는 별개라는 점을 라디오 이름만 보고도 바로
@@ -298,6 +310,12 @@ class RcloneG2gCopyProvider(BaseMetadataProvider):
             ],
         },
         {
+            "key": "STAGING_DIR",
+            "label": "임시 다운로드 폴더 (선택 - 압축 해제 모드에서 압축파일을 잠깐 받아두는 서버 로컬 절대경로, 비우면 플러그인 데이터 폴더)",
+            "type": "text",
+            "default": "",
+        },
+        {
             "key": "KEEP_ARCHIVE_AFTER_EXTRACT",
             "label": "압축 해제 후 원본 압축파일도 목적지 폴더에 함께 보관 ('다운로드 후 압축 해제' 모드 전용)",
             "type": "checkbox",
@@ -487,6 +505,7 @@ class RcloneG2gCopyProvider(BaseMetadataProvider):
                 fast_list=str(config.get("RCLONE_FAST_LIST", "true")).lower() != "false",
                 source_kind=source_kind,
                 keep_archive_after_extract=bool(config.get("KEEP_ARCHIVE_AFTER_EXTRACT")),
+                staging_dir=config.get("STAGING_DIR"),
             )
         except ConfigError as e:
             return False, str(e)
