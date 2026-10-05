@@ -27,7 +27,20 @@ guide_plugins.md 2장 "서브프로세스 실행 차단(기본값)" 규칙에 �
 .env에 ALLOW_PLUGIN_SUBPROCESS=true를 설정하지 않으면 이 플러그인은 로드 자체가
 거부됩니다. (→ 이 배포 환경에서는 이미 설정 완료됨)
 
-변경 이력(이번 수정, v2.40.0):
+변경 이력(이번 수정, v2.41.0):
+- **압축을 풀면 파일/폴더 이름이 `└┌▒Γ░Φ╣▀`처럼 깨지던 문제를 고쳤습니다.**
+  원래 이름은 "자기계발"이었고, 한글 윈도우용 압축 프로그램이 UTF-8 표시 없이
+  CP949 바이트로 이름을 저장한 zip을 파이썬 zipfile이 CP437로 읽어서 생기는
+  전형적인 깨짐입니다. UTF-8 표시가 없는 비ASCII 이름만 원래 바이트로 되돌려
+  utf-8 → cp949 → cp932 → gbk 순으로 "모든 이름이 엄격하게 해석되는 첫
+  인코딩"을 아카이브 단위로 골라 다시 해석합니다. 설정 ZIP_NAME_ENCODING으로
+  인코딩을 직접 지정할 수도 있습니다(일본어 zip이 한글로 잘못 인식되는 등
+  자동 판별이 틀릴 때). 이름을 바로잡으려고 extractall() 대신 항목별로 직접
+  풀도록 바꿨고, zip slip 검사는 바로잡은 이름 기준으로 그대로 적용됩니다.
+  백슬래시(\\) 구분자로 저장된 이름도 폴더로 풀립니다. 이미 깨진 이름으로 풀린
+  폴더는 자동으로 고쳐지지 않으니 지우고 다시 실행하세요.
+
+변경 이력(v2.40.0):
 - **압축 해제 모드의 임시 다운로드 폴더를 설정(STAGING_DIR)으로 직접 정할 수
   있게 했습니다.** "구글 드라이브 압축파일을 A 폴더에 받아 풀고 다시 B로
   MOVE하는 두 번의 작업을 하고 있다"는 문의에서 출발했습니다. 압축 해제
@@ -310,6 +323,19 @@ class RcloneG2gCopyProvider(BaseMetadataProvider):
             ],
         },
         {
+            "key": "ZIP_NAME_ENCODING",
+            "label": "압축 안 파일명 인코딩 (압축 해제 모드 - 한글 파일명이 깨질 때)",
+            "type": "select",
+            "default": "auto",
+            "options": [
+                {"value": "auto", "label": "자동 판별 (utf-8 → cp949 → cp932 → gbk 순)"},
+                {"value": "cp949", "label": "한글 (cp949)"},
+                {"value": "cp932", "label": "일본어 (cp932 / Shift-JIS)"},
+                {"value": "gbk", "label": "중국어 간체 (gbk)"},
+                {"value": "utf-8", "label": "UTF-8"},
+            ],
+        },
+        {
             "key": "STAGING_DIR",
             "label": "임시 다운로드 폴더 (선택 - 압축 해제 모드에서 압축파일을 잠깐 받아두는 서버 로컬 절대경로, 비우면 플러그인 데이터 폴더)",
             "type": "text",
@@ -506,6 +532,7 @@ class RcloneG2gCopyProvider(BaseMetadataProvider):
                 source_kind=source_kind,
                 keep_archive_after_extract=bool(config.get("KEEP_ARCHIVE_AFTER_EXTRACT")),
                 staging_dir=config.get("STAGING_DIR"),
+                zip_name_encoding=config.get("ZIP_NAME_ENCODING"),
             )
         except ConfigError as e:
             return False, str(e)

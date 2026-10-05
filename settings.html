@@ -155,6 +155,23 @@
   </p>
 
   <div class="rgc-field">
+    <label for="rgc-zip-name-encoding">ZIP_NAME_ENCODING (압축 안 파일명 인코딩)</label>
+    <select id="rgc-zip-name-encoding" name="ZIP_NAME_ENCODING">
+      <option value="auto" selected>자동 판별 (utf-8 → cp949 → cp932 → gbk 순)</option>
+      <option value="cp949">한글 (cp949)</option>
+      <option value="cp932">일본어 (cp932 / Shift-JIS)</option>
+      <option value="gbk">중국어 간체 (gbk)</option>
+      <option value="utf-8">UTF-8</option>
+    </select>
+    <p class="rgc-field-hint">
+      압축을 풀 때 파일/폴더 이름이 <code>└┌▒Γ░Φ╣▀</code>처럼 깨지면 압축 프로그램이
+      UTF-8 표시 없이 이름을 저장한 것입니다. 기본(자동)은 한글/일본어/중국어를
+      알아서 맞추지만, 일본어 압축파일이 한글로 잘못 인식되는 등 자동 판별이
+      틀리면 여기서 인코딩을 직접 고르세요.
+    </p>
+  </div>
+
+  <div class="rgc-field">
     <label for="rgc-staging-dir">STAGING_DIR (선택 — 임시 다운로드 폴더)</label>
     <input
       type="text"

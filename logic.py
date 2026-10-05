@@ -546,14 +546,81 @@ def _find_single_downloaded_file(staging_dir):
     return entries[0], None
 
 
+# zip 안 파일명 인코딩 문제 (v2.41.0)
+# ---------------------------------------------------------------------------
+# zip 규격상 파일명은 "UTF-8 플래그(bit 11)"가 켜져 있지 않으면 CP437로
+# 해석해야 한다. 그런데 한글 윈도우용 압축 프로그램(알집, 구버전 반디집 등)은
+# 이 플래그 없이 파일명을 CP949 바이트 그대로 저장하는 경우가 많다. 그러면
+# 파이썬 zipfile이 그 바이트를 CP437로 읽어서 "자기계발"이 "└┌▒Γ░Φ╣▀"처럼
+# 깨진 이름이 된다(CP437은 256개 바이트 전부를 1:1로 문자에 대응시키므로,
+# 깨진 문자열을 다시 CP437로 인코딩하면 원래 바이트를 100% 복원할 수 있다).
+# 그래서 UTF-8 플래그가 없는 비ASCII 이름만 골라 원래 바이트로 되돌린 뒤,
+# 후보 인코딩으로 다시 해석한다.
+_ZIP_NAME_ENCODING_CANDIDATES = ("utf-8", "cp949", "cp932", "gbk")
+
+# 설정(ZIP_NAME_ENCODING)으로 인코딩을 직접 지정한 경우의 값. start_copy_job()이
+# job마다 새로 정한다(한 번에 job이 하나만 돌므로 모듈 전역이어도 안전).
+# None이면 자동 판별.
+_ZIP_NAME_ENCODING_OVERRIDE = None
+
+
+def _fix_zip_member_names(infos):
+    """zip 항목들의 올바른 이름 목록과 선택된 인코딩을 반환한다.
+
+    반환: ([이름, ...], 인코딩 또는 None). 이름은 항상 '/' 구분자로 정규화된다.
+    인코딩이 None이면 이름을 고칠 필요가 없었거나(전부 ASCII/UTF-8 플래그),
+    어떤 후보로도 전부 해석되지 않아 원래(CP437로 읽은) 이름을 그대로 쓴 것.
+
+    항목마다 따로 추측하지 않고 "비ASCII 이름 전체를 엄격하게 해석할 수 있는
+    첫 번째 후보"를 아카이브 단위로 하나 고른다 - 한 압축파일 안의 이름은 같은
+    프로그램이 같은 인코딩으로 만든 것이라 일관되게 처리해야 안전하다.
+    """
+    raw_names = {}
+    for idx, info in enumerate(infos):
+        if info.flag_bits & 0x800:
+            continue  # UTF-8 플래그 - zipfile이 이미 올바르게 해석함
+        name = info.orig_filename
+        if name.isascii():
+            continue
+        try:
+            raw_names[idx] = name.encode("cp437")
+        except UnicodeEncodeError:
+            continue  # CP437로 읽은 이름이 아니면 건드리지 않음
+
+    chosen = None
+    if raw_names:
+        candidates = list(_ZIP_NAME_ENCODING_CANDIDATES)
+        if _ZIP_NAME_ENCODING_OVERRIDE:
+            candidates.insert(0, _ZIP_NAME_ENCODING_OVERRIDE)
+        for enc in candidates:
+            try:
+                for raw in raw_names.values():
+                    raw.decode(enc)
+            except (UnicodeDecodeError, LookupError):
+                continue
+            chosen = enc
+            break
+
+    names = []
+    for idx, info in enumerate(infos):
+        name = info.orig_filename
+        if chosen and idx in raw_names:
+            name = raw_names[idx].decode(chosen)
+        names.append(name.replace("\\", "/"))
+    return names, chosen
+
+
 def _extract_archive(archive_path, dest_dir):
     """zip/cbz 압축파일 하나를 dest_dir에 풀어놓는다.
 
     반환: (True, 압축 해제된 항목 수) 또는 (False, 에러 메시지)
 
+    파일명 인코딩이 깨지지 않도록 zipfile.extractall() 대신 항목마다 직접
+    풀면서 _fix_zip_member_names()로 바로잡은 이름을 쓴다.
+
     zip slip(압축파일 안의 상대경로가 '../' 등으로 목적지 바깥을 가리키는
     공격) 방지를 위해, 실제로 풀기 전에 모든 항목의 최종 경로가 dest_dir
-    내부인지 먼저 전부 검증한다.
+    내부인지 먼저 전부 검증한다(바로잡은 이름 기준).
     """
     ext = os.path.splitext(archive_path)[1].lower()
     if ext not in _SUPPORTED_ARCHIVE_EXTS and not zipfile.is_zipfile(archive_path):
@@ -566,13 +633,31 @@ def _extract_archive(archive_path, dest_dir):
         os.makedirs(dest_dir, exist_ok=True)
         dest_real = os.path.realpath(dest_dir)
         with zipfile.ZipFile(archive_path) as zf:
-            names = zf.namelist()
-            for member in names:
-                target_real = os.path.realpath(os.path.join(dest_dir, member))
+            infos = zf.infolist()
+            names, chosen_enc = _fix_zip_member_names(infos)
+
+            plan = []
+            for info, name in zip(infos, names):
+                target = os.path.join(dest_dir, name)
+                target_real = os.path.realpath(target)
                 if target_real != dest_real and not target_real.startswith(dest_real + os.sep):
-                    return False, f"압축 해제 중단: 안전하지 않은 경로가 포함되어 있습니다 ({member})"
-            zf.extractall(dest_dir)
-        return True, len(names)
+                    return False, f"압축 해제 중단: 안전하지 않은 경로가 포함되어 있습니다 ({name})"
+                plan.append((info, name, target))
+
+            if chosen_enc:
+                try:
+                    _append_log_line(f"[i] 압축 안 파일명을 {chosen_enc} 인코딩으로 인식해 이름을 바로잡았습니다.")
+                except Exception:  # noqa: BLE001
+                    pass
+
+            for info, name, target in plan:
+                if name.endswith("/") or info.is_dir():
+                    os.makedirs(target, exist_ok=True)
+                    continue
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                with zf.open(info) as src, open(target, "wb") as dst:
+                    shutil.copyfileobj(src, dst, 1024 * 1024)
+        return True, len(infos)
     except zipfile.BadZipFile as e:
         return False, f"압축 해제 실패 (손상되었거나 zip 포맷이 아닌 파일일 수 있음): {e}"
     except Exception as e:  # noqa: BLE001
@@ -1181,7 +1266,8 @@ def _run_job(job_id, rclone_path, config_path, rclone_remote, source_id, dest_fo
 def start_copy_job(rclone_path, config_path, rclone_remote, source_folder_url, dest_folder_name,
                     source_url_input=None, dest_input=None, discord_webhook_url=None,
                     transfers=8, checkers=16, fast_list=True, source_kind="folder",
-                    keep_archive_after_extract=False, staging_dir=None):
+                    keep_archive_after_extract=False, staging_dir=None,
+                    zip_name_encoding=None):
     """
     유효성 검사 후 백그라운드 스레드로 rclone copy(또는 backend copyid, 또는
     다운로드+zip 압축 해제)를 시작합니다. 이미 실행 중인(그리고 실제로
@@ -1219,6 +1305,10 @@ def start_copy_job(rclone_path, config_path, rclone_remote, source_folder_url, d
         하위 폴더를 만들지 않고 목적지 그 자체에 바로 풀어놓는다. zip/cbz만
         지원. keep_archive_after_extract가 True면 원본 압축파일도 그 폴더에
         함께 남겨두고, False(기본)면 정리한다.
+
+    zip_name_encoding: 압축 안 파일명의 인코딩. 비우거나 "auto"면 자동 판별
+    (utf-8 -> cp949 -> cp932 -> gbk 순으로 시도). 일본어 등 자동 판별이
+    틀리는 압축파일이면 "cp932" 같은 값을 직접 지정한다.
 
     staging_dir: 압축 해제 모드(folder_extract/file_extract)에서 압축파일을
     잠깐 받아두는 임시 폴더의 루트(서버 로컬 절대경로). 비우면 플러그인
@@ -1335,8 +1425,19 @@ def start_copy_job(rclone_path, config_path, rclone_remote, source_folder_url, d
 
     # 임시 다운로드 폴더(STAGING_DIR) - 압축 해제 모드에서만 의미가 있다.
     # 매 job마다 override를 새로 정한다(이전 job의 값이 남아 있으면 안 됨).
-    global _STAGING_ROOT_OVERRIDE
+    global _STAGING_ROOT_OVERRIDE, _ZIP_NAME_ENCODING_OVERRIDE
     _STAGING_ROOT_OVERRIDE = None
+    # 압축 안 파일명 인코딩(ZIP_NAME_ENCODING) - 비우거나 auto면 자동 판별.
+    import codecs
+    enc = (zip_name_encoding or "").strip().lower()
+    if enc in ("", "auto"):
+        _ZIP_NAME_ENCODING_OVERRIDE = None
+    else:
+        try:
+            codecs.lookup(enc)
+        except LookupError:
+            raise ValueError(f"알 수 없는 파일명 인코딩입니다: {enc}")
+        _ZIP_NAME_ENCODING_OVERRIDE = enc
     staging_dir = (staging_dir or "").strip()
     if staging_dir and source_kind in ("folder_extract", "file_extract"):
         if not os.path.isabs(staging_dir):
